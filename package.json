@@ -1,0 +1,9 @@
+{
+  "name": "codex-drive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "codex-drive": "./src/cli.mjs" },
+  "engines": { "node": ">=26" },
+  "scripts": { "test": "node --test", "proof": "node scripts/proof.mjs" }
+}

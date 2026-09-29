@@ -1,0 +1,61 @@
+{
+  "date": "2026-09-29T19:47:07.404Z",
+  "node": "v26.8.2",
+  "run": "/tmp/codex-drive-proof/run-r9zC52",
+  "prompt": "Repeat 8 times: run `sleep 15; date`, then write `tick N`. When done, say FINISHED.",
+  "model": "gpt-6.1-sol",
+  "effort": "low",
+  "concurrentServe": "one owner; other invocation reused the listener or failed on the startup lock",
+  "server": {
+    "pid": 52700,
+    "port": 53341
+  },
+  "steer": {
+    "threadId": "01a0eeb4-e715-7843-8d69-b0c445bc752e",
+    "turnId": "01a0eeb4-e91c-7a21-b6cf-639f742a3cea",
+    "ticks": [
+      1,
+      2
+    ],
+    "steeringResult": {
+      "turnId": "01a0eeb4-e91c-7a21-b6cf-639f742a3cea"
+    },
+    "status": "completed",
+    "log": "/tmp/codex-drive-proof/run-r9zC52/steer.jsonl",
+    "reconnect": true,
+    "lostStartReplyRecovered": true,
+    "sleepCommandItemIds": [
+      "exec-010ddfc8-dfeb-423c-a489-bea3c20b1cc2",
+      "exec-41f09852-e521-4ed4-86d5-c1fac230b52a",
+      "exec-ae2d2aad-cb0d-4abd-99f4-331526375d5c"
+    ],
+    "sleepCommandsStarted": 3
+  },
+  "resume": {
+    "threadId": "01a0eeb4-e715-7843-8d69-b0c445bc752e",
+    "turnId": "01a0eeb5-e594-7a02-af4e-6e0fe4677f44",
+    "log": "/tmp/codex-drive-proof/run-r9zC52/steer.jsonl",
+    "status": "completed"
+  },
+  "interrupt": {
+    "threadId": "01a0eeb5-f798-7020-95ba-e4d051cdac5a",
+    "turnId": "01a0eeb5-f80b-79e1-8d17-e492bd1256ad",
+    "ticks": [
+      1,
+      2
+    ],
+    "status": "interrupted",
+    "log": "/tmp/codex-drive-proof/run-r9zC52/interrupt.jsonl",
+    "sleepCommandItemIds": [
+      "exec-aa8cba2f-3129-4572-a779-7440d4d6585d",
+      "exec-d55d8c9a-65db-4ee8-bb46-338d1adaa337"
+    ],
+    "sleepCommandsStarted": 2
+  },
+  "cleanup": {
+    "port": 53341,
+    "stopped": [
+      52700
+    ]
+  }
+}
