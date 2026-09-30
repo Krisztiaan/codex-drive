@@ -1,7 +1,7 @@
 import { createConnection } from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdirSync, openSync, closeSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, openSync, closeSync, readFileSync, existsSync, unlinkSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Store, stateHome, atomicWrite } from './state.mjs';
 
@@ -21,6 +21,22 @@ function listenerPids(port) {
     return [...pids];
   } catch (e) { if (e.status === 1) return []; throw e; }
 }
+export function warnServerDirectory(port) {
+  for (const pid of listenerPids(port)) {
+    let lines;
+    try { lines = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fni'], { encoding: 'utf8' }).split('\n'); }
+    catch (error) { if (error.status === 1) continue; throw error; }
+    const cwd = lines.find(line => line.startsWith('n'))?.slice(1);
+    if (!cwd?.startsWith('/')) continue; // No pathname evidence; don't claim it was deleted.
+    const inode = lines.find(line => line.startsWith('i'))?.slice(1);
+    let missing = false;
+    try {
+      const stat = statSync(cwd, { bigint: true });
+      missing = !stat.isDirectory() || Boolean(inode && inode !== String(stat.ino));
+    } catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) missing = true; else throw error; }
+    if (missing) console.error(`WARNING: app-server on 127.0.0.1:${port} (pid ${pid}) working directory no longer exists: ${JSON.stringify(cwd)}. Configuration loading and thread resume/adopt may fail. Restart this server from a stable directory when its sessions can be safely resumed.`);
+  }
+}
 function descendedFrom(pid, ancestor) {
   const visited = new Set();
   while (pid > 1 && !visited.has(pid)) {
@@ -32,7 +48,7 @@ function descendedFrom(pid, ancestor) {
   return false;
 }
 export async function serve(port, stop = false) {
-  const home = stateHome(); mkdirSync(home, { recursive: true, mode: 0o700 });
+  const home = resolve(stateHome()); mkdirSync(home, { recursive: true, mode: 0o700 });
   const path = join(home, `server-${port}.json`);
   const unlock = new Store(join(home, 'servers')).lock(String(port));
   try {
@@ -48,9 +64,9 @@ export async function serve(port, stop = false) {
       if (existsSync(path)) unlinkSync(path);
       return { port, stopped: targets };
     }
-    if (await listening(port)) return { port, alreadyListening: true };
+    if (await listening(port)) { warnServerDirectory(port); return { port, alreadyListening: true }; }
     const fd = openSync(join(home, `server-${port}.log`), 'a', 0o600);
-    const child = spawn('codex', ['app-server', '--listen', `ws://127.0.0.1:${port}`], { detached: true, stdio: ['ignore', fd, fd] });
+    const child = spawn('codex', ['app-server', '--listen', `ws://127.0.0.1:${port}`], { cwd: home, detached: true, stdio: ['ignore', fd, fd] });
     closeSync(fd);
     let spawnError; child.once('error', error => { spawnError = error; }); child.unref();
     for (let i = 0; i < 100; i++) {
@@ -59,9 +75,9 @@ export async function serve(port, stop = false) {
         const owned = listenerPids(port).filter(pid => descendedFrom(pid, child.pid));
         if (!owned.length) {
           if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, 'SIGTERM');
-          return { port, alreadyListening: true };
+          warnServerDirectory(port); return { port, alreadyListening: true };
         }
-        atomicWrite(path, { pid: owned[0], launcherPid: child.pid, port }); return { pid: owned[0], port };
+        atomicWrite(path, { pid: owned[0], launcherPid: child.pid, port, cwd: home }); return { pid: owned[0], port };
       }
       if (child.exitCode !== null || child.signalCode !== null) break;
       await delay(100);

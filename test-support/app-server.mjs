@@ -11,7 +11,7 @@ function frame(message) {
   const header = body.length < 126 ? Buffer.from([0x81, body.length]) : Buffer.from([0x81, 126, body.length >> 8, body.length & 255]);
   return Buffer.concat([header, body]);
 }
-export async function fixture(t) {
+export async function fixture(t, { port: requestedPort = 0, diagnostics } = {}) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
@@ -61,7 +61,7 @@ export async function fixture(t) {
         let result;
         switch (method) {
           case 'initialize': result = {}; break;
-          case 'server/diagnostics': result = { diagnostics: ['PASSTHROUGH'] }; break;
+          case 'server/diagnostics': result = diagnostics ? diagnostics() : { diagnostics: ['PASSTHROUGH'] }; break;
           case 'thread/read': {
             if (params.threadId === 'missing') { socket.write(frame({ id, error: { code: -32001, message: 'Not found', data: { detail: 'original' } } })); continue; }
             result = { thread: { id: threadId, cwd: home, turns } }; break;
@@ -100,7 +100,7 @@ export async function fixture(t) {
     }
     socket.on('data', read);
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await new Promise(resolve => server.listen(requestedPort, '127.0.0.1', resolve));
   const port = server.address().port;
   const state = { name: 'demo', threadId, turnId: 'turn-1', cwd: home, model: 'gpt-6.1-sol', effort: 'low', sandbox: 'workspace-write', approval: 'on-request', addDirs: [], logPath: join(home, 'events.jsonl'), port, status: 'completed', lastAgentMessage: 'PREVIOUS', lastEventTime: null };
   function seed(overrides = {}) { writeFileSync(join(home, 'threads/demo.json'), JSON.stringify({ ...state, ...overrides })); }

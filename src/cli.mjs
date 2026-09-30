@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from './args.mjs';
 import { Store, applyEvent } from './state.mjs';
-import { serve } from './server.mjs';
+import { serve, warnServerDirectory } from './server.mjs';
 import { methods, methodSchema } from './protocol.mjs';
 import { readJson, callParams, textInput, turnParams } from './params.mjs';
 import { connection } from './client.mjs';
@@ -128,9 +128,12 @@ async function main() {
     console.log(lines.slice(-Number(options.n ?? 20)).join('\n')); return;
   }
   if (command === 'status') {
-    const states = positional.length ? [store.read(positional[0])] : store.all(), results = [];
+    const states = positional.length ? [store.read(positional[0])] : store.all(), results = [], inspected = new Set();
+    if (!states.length) warnServerDirectory(Number(options.port ?? 4700));
     for (const state of states) {
-      const rpc = await connection(portFor(options, state), undefined, { threadId: state.threadId });
+      const port = portFor(options, state);
+      if (!inspected.has(port)) { warnServerDirectory(port); inspected.add(port); }
+      const rpc = await connection(port, undefined, { threadId: state.threadId });
       rpc.on('event', event => applyEvent(state, event));
       try { await snapshot(rpc, state); results.push(statusView(store, state)); } finally { await rpc.close(); }
     }

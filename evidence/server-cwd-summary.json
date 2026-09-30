@@ -1,0 +1,111 @@
+{
+  "run": "/tmp/codex-drive-proof/server-cwd-POYxja",
+  "date": "2026-09-30T11:12:16.833Z",
+  "node": "v26.8.2",
+  "steps": [
+    {
+      "command": "serve",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "start",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "call",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "adopt",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "resume",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "status",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "serve",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "serve",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "adopt",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "serve",
+      "code": 0,
+      "stderr": "WARNING: app-server on 127.0.0.1:59443 (pid 3612) working directory no longer exists: \"/private/tmp/codex-drive-proof/server-cwd-POYxja/legacy-caller\". Configuration loading and thread resume/adopt may fail. Restart this server from a stable directory when its sessions can be safely resumed.\n"
+    },
+    {
+      "command": "status",
+      "code": 0,
+      "stderr": "WARNING: app-server on 127.0.0.1:59443 (pid 3612) working directory no longer exists: \"/private/tmp/codex-drive-proof/server-cwd-POYxja/legacy-caller\". Configuration loading and thread resume/adopt may fail. Restart this server from a stable directory when its sessions can be safely resumed.\n"
+    },
+    {
+      "command": "serve",
+      "code": 0,
+      "stderr": ""
+    },
+    {
+      "command": "serve",
+      "code": 0,
+      "stderr": ""
+    }
+  ],
+  "servers": [
+    {
+      "pid": 3190,
+      "port": 59389
+    },
+    {
+      "pid": 3612,
+      "port": 59443
+    }
+  ],
+  "launchCwd": "/private/tmp/codex-drive-proof/server-cwd-POYxja/state",
+  "stable": {
+    "threadId": "01a0f203-e807-70f2-b9e3-a29af27e61fb",
+    "callerDeleted": true,
+    "rawResume": true,
+    "adopt": true,
+    "resumedTurnId": "01a0f204-008b-7a51-a11c-cc1a250a72cf",
+    "finalMessage": "RESUME-OK"
+  },
+  "legacy": {
+    "pid": 3612,
+    "port": 59443,
+    "warningOnServe": "WARNING: app-server on 127.0.0.1:59443 (pid 3612) working directory no longer exists: \"/private/tmp/codex-drive-proof/server-cwd-POYxja/legacy-caller\". Configuration loading and thread resume/adopt may fail. Restart this server from a stable directory when its sessions can be safely resumed.\n",
+    "warningOnStatus": "WARNING: app-server on 127.0.0.1:59443 (pid 3612) working directory no longer exists: \"/private/tmp/codex-drive-proof/server-cwd-POYxja/legacy-caller\". Configuration loading and thread resume/adopt may fail. Restart this server from a stable directory when its sessions can be safely resumed.\n"
+  },
+  "passed": true,
+  "cleanup": [
+    {
+      "port": 59389,
+      "stopped": []
+    },
+    {
+      "port": 59443,
+      "stopped": [
+        3612
+      ]
+    }
+  ],
+  "authRemoved": true
+}
