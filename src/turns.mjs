@@ -221,6 +221,14 @@ export async function runAttached(store, command, options, key, prompt, readyCal
 }
 export async function waitForTurn(store, options, key) {
   const state = store.read(key); portFor(options, state);
+  const completions = new Map();
+  const rememberFailure = known => {
+    if (known.turnId && known.status === 'failed' && !completions.has(known.turnId)) {
+      completions.set(known.turnId, { status: known.status, error: known.error,
+        ...(known.lastAgentMessage != null ? { lastAgentMessage: known.lastAgentMessage } : {}) });
+    }
+  };
+  rememberFailure(state);
   const controller = new AbortController();
   const timer = options.timeout ? setTimeout(() => controller.abort(new Error('Wait timed out')), Number(options.timeout) * 1000) : null;
   let rpc;
@@ -232,13 +240,25 @@ export async function waitForTurn(store, options, key) {
           rpc = await connection(state.port, controller.signal, { threadId: state.threadId });
           rpc.on('event', event => {
             const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
-            if (!targetTurnId || !eventTurnId || eventTurnId === targetTurnId) applyEvent(state, event);
+            if (!targetTurnId || !eventTurnId || eventTurnId === targetTurnId) {
+              applyEvent(state, event);
+              if (event.method === 'turn/completed' && event.params.threadId === state.threadId) {
+                const { status, error } = event.params.turn;
+                completions.set(eventTurnId, { status, error,
+                  ...(state.turnId === eventTurnId && state.lastAgentMessage != null ? { lastAgentMessage: state.lastAgentMessage } : {}) });
+              }
+            }
           });
           await rpc.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal });
         }
         await snapshot(rpc, state, controller.signal, targetTurnId);
         if (!state.turnId) throw new Error('Thread has no current turn');
         targetTurnId ??= state.turnId; failures = 0;
+        // History snapshots can lose terminal errors. The observed completion
+        // (or attached logger's saved failure) is authoritative for this turn.
+        if (terminal(state.status) && !completions.has(state.turnId)) rememberFailure(store.read(key));
+        const completion = completions.get(state.turnId);
+        if (completion) Object.assign(state, completion);
         if (terminal(state.status)) break;
         await delay(100, undefined, { signal: controller.signal });
       } catch (error) {

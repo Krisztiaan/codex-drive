@@ -11,7 +11,7 @@ function frame(message) {
   const header = body.length < 126 ? Buffer.from([0x81, body.length]) : Buffer.from([0x81, 126, body.length >> 8, body.length & 255]);
   return Buffer.concat([header, body]);
 }
-export async function fixture(t, { port: requestedPort = 0, diagnostics } = {}) {
+export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList } = {}) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
@@ -78,7 +78,12 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics } = {}) 
             reads++;
             if (!(threads.get(params.threadId) ?? turns).length) { socket.write(frame({ id, error: { code: -32600, message: 'Thread not materialized before first user message' } })); continue; }
             const data = [...(threads.get(params.threadId) ?? turns)].reverse(), offset = Number(params.cursor ?? 0), end = offset + (params.limit ?? data.length);
-            result = { data: data.slice(offset, end), nextCursor: end < data.length ? String(end) : null }; break;
+            result = { data: data.slice(offset, end), nextCursor: end < data.length ? String(end) : null };
+            if (turnsList) {
+              Promise.resolve(turnsList(params, structuredClone(result))).then(result => socket.write(frame({ id, result })));
+              continue;
+            }
+            break;
           }
           case 'turn/start': {
             const turn = { id: `turn-${nextTurn++}`, status: 'inProgress', items: [], error: null };

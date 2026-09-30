@@ -1,0 +1,78 @@
+{
+  "observedWait": {
+    "turnId": "01a0f2c4-7df7-72b2-9b07-631751012ace",
+    "status": "interrupted",
+    "error": null,
+    "failure": null,
+    "lastEventTime": "2026-09-30T15:32:07.897Z",
+    "exitCode": 130
+  },
+  "completion": {
+    "receivedAt": "2026-09-30T15:32:07.897Z",
+    "method": "turn/completed",
+    "params": {
+      "threadId": "01a0f154-de45-7811-a1f0-ce54af6dd6aa",
+      "turn": {
+        "id": "01a0f2c4-7df7-72b2-9b07-631751012ace",
+        "items": [],
+        "itemsView": "notLoaded",
+        "status": "failed",
+        "error": {
+          "message": "Selected model is at capacity. Please try a different model.",
+          "codexErrorInfo": "serverOverloaded",
+          "additionalDetails": null,
+          "misalignment": null
+        },
+        "startedAt": 1790779358,
+        "completedAt": 1790782327,
+        "durationMs": 2969107
+      }
+    },
+    "emittedAtMs": 1790782327897
+  },
+  "currentRead": {
+    "threadId": "01a0f154-de45-7811-a1f0-ce54af6dd6aa",
+    "turn": {
+      "id": "01a0f2c4-7df7-72b2-9b07-631751012ace",
+      "status": "failed",
+      "error": {
+        "message": "Selected model is at capacity. Please try a different model.",
+        "codexErrorInfo": "serverOverloaded",
+        "additionalDetails": null,
+        "misalignment": null
+      },
+      "itemsView": "full",
+      "itemCount": 141
+    }
+  },
+  "currentTurnsList": {
+    "method": "thread/turns/list",
+    "turn": {
+      "id": "01a0f2c4-7df7-72b2-9b07-631751012ace",
+      "status": "failed",
+      "error": {
+        "message": "Selected model is at capacity. Please try a different model.",
+        "codexErrorInfo": "serverOverloaded",
+        "additionalDetails": null,
+        "misalignment": null
+      },
+      "itemsView": "full",
+      "itemCount": 141
+    }
+  },
+  "reproduction": {
+    "command": "node --test --test-name-pattern='notLoaded capacity completion' test/failure-cli.test.mjs",
+    "before": {
+      "status": "interrupted",
+      "error": null,
+      "failure": null,
+      "exitCode": 130
+    },
+    "after": {
+      "status": "failed",
+      "errorInfo": "serverOverloaded",
+      "failureClass": "capacity",
+      "exitCode": 75
+    }
+  }
+}
