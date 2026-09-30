@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
+import { validateCall } from './protocol.mjs';
 
 export class Rpc extends EventEmitter {
   constructor(port) { super(); this.port = port; this.nextId = 1; this.pending = new Map(); }
-  async connect(signal) {
+  async connect(signal, initializeParams) {
     signal?.throwIfAborted();
     const socket = new WebSocket(`ws://127.0.0.1:${this.port}`);
     this.socket = socket;
@@ -28,12 +29,13 @@ export class Rpc extends EventEmitter {
       this.emit('disconnect');
     });
     // Generated InitializeParams + ClientNotification; no JSON-RPC version field required.
-    await this.request('initialize', { clientInfo: { name: 'codex-drive', title: 'codex-drive', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } }, { signal });
+    this.initializeResult = await this.request('initialize', initializeParams ?? { clientInfo: { name: 'codex-drive', title: 'codex-drive', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } }, { signal });
     this.send({ method: 'initialized' });
   }
   send(message) { if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('Connection is closed'); this.socket.send(JSON.stringify(message)); }
   request(method, params, { signal } = {}) {
     signal?.throwIfAborted();
+    validateCall(method, params);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const onAbort = () => { clearTimeout(timer); this.pending.delete(id); reject(signal.reason); };

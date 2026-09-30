@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, linkSync, readdirSy
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { mergeRateLimits, failureDetails } from './failures.mjs';
 
 export function stateHome() { return process.env.CODEX_DRIVE_HOME ?? join(homedir(), '.codex-drive'); }
 export function checkKey(key) {
@@ -49,15 +50,25 @@ export class Store {
 }
 export function applyEvent(state, event, time = new Date().toISOString()) {
   const p = event.params;
+  if (event.method === 'account/rateLimits/updated') {
+    const quotaId = p.rateLimits?.limitId;
+    const previous = quotaId != null ? state.rateLimitsByLimitId?.[quotaId] ?? state.rateLimits : state.rateLimits;
+    state.rateLimits = mergeRateLimits(previous, p.rateLimits);
+    if (state.rateLimits?.limitId != null) state.rateLimitsByLimitId = { ...state.rateLimitsByLimitId, [state.rateLimits.limitId]: state.rateLimits };
+    state.rateLimitsUpdatedAt = time;
+    if (state.status === 'failed') state.failure = failureDetails(state.error, state.rateLimits);
+    return true;
+  }
   if (p?.threadId !== state.threadId) return false;
   state.lastEventTime = time;
   if (event.method === 'turn/started') {
     if (state.turnId !== p.turn.id) state.lastAgentMessage = null;
-    state.turnId = p.turn.id; state.status = 'running'; state.error = null;
+    state.turnId = p.turn.id; state.status = 'running'; state.error = null; state.failure = null;
   }
   if (event.method === 'turn/completed' && p.turn.id === state.turnId) {
     state.status = p.turn.status;
     state.error = p.turn.error;
+    state.failure = state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null;
   }
   if (event.method === 'item/completed' && p.turnId === state.turnId && p.item?.type === 'agentMessage') {
     state.lastAgentMessage = p.item.text.trim().split('\n').filter(Boolean).at(-1) ?? null;

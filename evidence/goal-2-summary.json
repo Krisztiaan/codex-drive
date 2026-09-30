@@ -1,0 +1,239 @@
+{
+  "date": "2026-09-30T10:50:40.175Z",
+  "node": "v26.8.2",
+  "schema": {
+    "version": "codex-cli 0.159.0",
+    "clientMethods": 167,
+    "serverRequests": 11,
+    "regeneration": "npm run protocol"
+  },
+  "tests": {
+    "command": "npm test",
+    "passed": 71,
+    "failed": 0
+  },
+  "fullClient": {
+    "run": "/tmp/codex-drive-proof/full-client-rLMBSa",
+    "server": {
+      "pid": 91631,
+      "port": 53826
+    },
+    "execSeed": {
+      "threadId": "01a0f1eb-f8a8-71b2-ad4f-5e1698ddbdcb",
+      "exitCode": 0
+    },
+    "approval": {
+      "threadId": "01a0f1ec-a9ce-70a0-8275-2c2fb6e8eb89",
+      "turnId": "01a0f1ec-a9f1-7f73-b2fa-8129eddaae90",
+      "method": "item/commandExecution/requestApproval",
+      "requestId": "35972b16-9f11-4aac-9f5f-5a52525d8141",
+      "fileWrittenAfterResponse": true
+    },
+    "genericUnwrapped": "configRequirements/read",
+    "passed": true,
+    "cleanup": {
+      "port": 53826,
+      "stopped": [
+        91631
+      ]
+    },
+    "steps": [
+      {
+        "command": "adopt",
+        "exitCode": 0,
+        "threadId": "01a0f1eb-f8a8-71b2-ad4f-5e1698ddbdcb",
+        "turnId": "01a0f1eb-fa4d-7bf3-8234-ca748ff8d764"
+      },
+      {
+        "command": "resume",
+        "exitCode": 0,
+        "threadId": "01a0f1eb-f8a8-71b2-ad4f-5e1698ddbdcb",
+        "turnId": "01a0f1ec-10cc-7f12-82a8-1fbcf16d124e"
+      },
+      {
+        "command": "steer",
+        "exitCode": 0,
+        "turnId": "01a0f1ec-10cc-7f12-82a8-1fbcf16d124e"
+      },
+      {
+        "command": "wait",
+        "exitCode": 0,
+        "threadId": "01a0f1eb-f8a8-71b2-ad4f-5e1698ddbdcb",
+        "turnId": "01a0f1ec-10cc-7f12-82a8-1fbcf16d124e",
+        "status": "completed",
+        "lastAgentMessage": "ADOPT-STEERED-OK"
+      },
+      {
+        "command": "fork",
+        "exitCode": 0,
+        "threadId": "01a0f1ec-5b4e-7ff0-b162-ce6426ed8f8d",
+        "turnId": "01a0f1ec-10cc-7f12-82a8-1fbcf16d124e"
+      },
+      {
+        "command": "resume",
+        "exitCode": 0,
+        "threadId": "01a0f1eb-f8a8-71b2-ad4f-5e1698ddbdcb",
+        "turnId": "01a0f1ec-5c8f-7e82-b241-b9b50b4be2dc"
+      },
+      {
+        "command": "resume",
+        "exitCode": 0,
+        "threadId": "01a0f1ec-5b4e-7ff0-b162-ce6426ed8f8d",
+        "turnId": "01a0f1ec-5d9f-7db0-98e0-48e7f8f6b17d"
+      },
+      {
+        "command": "wait",
+        "exitCode": 0,
+        "threadId": "01a0f1ec-5b4e-7ff0-b162-ce6426ed8f8d",
+        "turnId": "01a0f1ec-5d9f-7db0-98e0-48e7f8f6b17d",
+        "status": "completed",
+        "lastAgentMessage": "BRANCH-B-OK"
+      },
+      {
+        "command": "steer",
+        "exitCode": 0,
+        "turnId": "01a0f1ec-5c8f-7e82-b241-b9b50b4be2dc"
+      },
+      {
+        "command": "wait",
+        "exitCode": 0,
+        "threadId": "01a0f1eb-f8a8-71b2-ad4f-5e1698ddbdcb",
+        "turnId": "01a0f1ec-5c8f-7e82-b241-b9b50b4be2dc",
+        "status": "completed",
+        "lastAgentMessage": "BRANCH-A-OK"
+      },
+      {
+        "command": "respond",
+        "exitCode": 0,
+        "requestId": "35972b16-9f11-4aac-9f5f-5a52525d8141",
+        "responded": true
+      },
+      {
+        "command": "wait",
+        "exitCode": 0,
+        "threadId": "01a0f1ec-a9ce-70a0-8275-2c2fb6e8eb89",
+        "turnId": "01a0f1ec-a9f1-7f73-b2fa-8129eddaae90",
+        "status": "completed",
+        "lastAgentMessage": "APPROVAL-OK"
+      }
+    ]
+  },
+  "previousProof": {
+    "run": "/tmp/codex-drive-proof/run-VJLwcD",
+    "server": {
+      "pid": 88856,
+      "port": 52602
+    },
+    "steer": {
+      "threadId": "01a0f1e5-2578-76a2-8d2c-323ad10a08c4",
+      "turnId": "01a0f1e5-277e-7261-9538-2467ec1710ef",
+      "ticks": [
+        1,
+        2
+      ],
+      "steeringResult": {
+        "turnId": "01a0f1e5-277e-7261-9538-2467ec1710ef"
+      },
+      "status": "completed",
+      "log": "/tmp/codex-drive-proof/run-VJLwcD/steer.jsonl",
+      "reconnect": true,
+      "lostStartReplyRecovered": true
+    },
+    "resume": {
+      "threadId": "01a0f1e5-2578-76a2-8d2c-323ad10a08c4",
+      "turnId": "01a0f1e6-2a17-70a0-87af-961e9a6b5600",
+      "log": "/tmp/codex-drive-proof/run-VJLwcD/steer.jsonl",
+      "status": "completed"
+    },
+    "interrupt": {
+      "threadId": "01a0f1e6-37c3-7200-9c89-6959350c6533",
+      "turnId": "01a0f1e6-37ea-7da3-921f-371ae2fa4f13",
+      "ticks": [
+        1,
+        2
+      ],
+      "status": "interrupted",
+      "log": "/tmp/codex-drive-proof/run-VJLwcD/interrupt.jsonl"
+    },
+    "steerSleepItems": [
+      "exec-430db974-9638-4c45-9987-bc21b510e6d2",
+      "exec-2d78e9fe-8abd-49f6-89eb-8a69affcd8a9",
+      "exec-d7260aa6-85a9-4c4e-aa81-29ae53943c21"
+    ],
+    "interruptSleepItems": [
+      "exec-358fdb86-eae7-4e7d-ac3f-af012975d95b",
+      "exec-1200fb35-291e-4e84-ac93-4a8ef0e04607"
+    ],
+    "cleanup": {
+      "port": 52602,
+      "stopped": [
+        88856
+      ]
+    }
+  },
+  "detachedProof": {
+    "run": "/tmp/codex-drive-proof/orchestrator-FtQ9zm",
+    "server": {
+      "pid": 90645,
+      "port": 53314
+    },
+    "passed": true,
+    "cleanup": {
+      "port": 53314,
+      "stopped": [
+        90645
+      ]
+    }
+  },
+  "path": {
+    "symlink": "/Users/krisztiaan/.local/bin/codex-drive",
+    "target": "/Users/krisztiaan/dev/codex-drive/src/cli.mjs",
+    "cwd": "/tmp/codex-drive-proof",
+    "helpExit": 0
+  },
+  "cleanup": {
+    "portsClosed": [
+      52836,
+      55590,
+      60528,
+      64446,
+      52602,
+      53314,
+      53826
+    ],
+    "pidsGone": [
+      81939,
+      82891,
+      83423,
+      83421,
+      84626,
+      84987,
+      84961,
+      86171,
+      86977,
+      86771,
+      86768,
+      88856,
+      90645,
+      90875,
+      91631,
+      92104,
+      92020,
+      92018,
+      83108,
+      84796,
+      86420,
+      90691,
+      91871
+    ],
+    "authCopiesRemoved": [
+      "full-client-tRmxiV",
+      "full-client-p1mSsA",
+      "full-client-0OilJW",
+      "full-client-H2TO7P",
+      "run-VJLwcD",
+      "orchestrator-FtQ9zm",
+      "full-client-rLMBSa"
+    ]
+  }
+}

@@ -1,4 +1,3 @@
-Generated with `codex app-server generate-ts` from codex-cli 0.159.0.
+Generated with `codex app-server generate-json-schema --experimental` from codex-cli 0.159.0.
 
-Run `node scripts/generate-protocol.mjs` to regenerate this dependency-closed subset.
-Runtime is plain ESM; these files document the actual protocol contract, with no runtime dependency.
+Run `npm run protocol` to regenerate the complete canonical JSON Schema bundle from the installed Codex. It includes client requests, notifications, server requests, responses, errors, and experimental APIs. Runtime validation reads this bundle directly; no method or parameter lists are maintained by hand.

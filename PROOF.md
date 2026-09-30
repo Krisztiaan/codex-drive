@@ -1,6 +1,6 @@
 # Live acceptance proof
 
-The latest verification is the [2026-09-30 orchestration follow-up](#2026-09-30-orchestration-follow-up) below. The first section preserves the original 2026-09-29 evidence.
+The latest verification is the [Goal 2 full-client acceptance](#goal-2-full-client-acceptance) below. The first section preserves the original 2026-09-29 evidence.
 
 Run date: 2026-09-29T19:47:07.404Z. Runtime: Node v26.8.2, codex-cli 0.159.0, requested model `gpt-6.1-sol`, effort `low`. The server returned the requested model; no model-reroute notification was logged. All goal work ran in fresh subdirectories of `/tmp/codex-drive-proof/run-r9zC52` with explicit `danger-full-access` and approval `never`.
 
@@ -98,3 +98,45 @@ The first orchestrator run also passed at `/tmp/codex-drive-proof/orchestrator-0
 PATH installation resolves `/Users/krisztiaan/.local/bin/codex-drive` to `/Users/krisztiaan/dev/codex-drive/src/cli.mjs`. The actual installed command printed usage and exited 0 from another directory, without requiring a server. Unit installation checks additionally preserve existing regular files, directories, foreign links and broken links.
 
 Deliberately unchanged: aggregate status fails if any saved server is unreachable; tail scans the whole log; connection gaps do not promise lossless replay; approvals remain noninteractive. The concurrent, unrelated `GOAL-2.md` is left unmodified and uncommitted.
+
+
+## Goal 2 full-client acceptance
+
+Authoritative scope: [GOAL-2.md](GOAL-2.md). Runtime Node v26.8.2, installed codex-cli 0.159.0. `npm run protocol` regenerated the complete experimental canonical JSON Schema: **167 client request methods and 11 server request methods**, counted from its generated request unions. Runtime parameter/response validation reads that schema through Ajv; the superseded partial TypeScript tree was removed. New client methods require regeneration, rather than another wrapper.
+
+Final `npm test`: **71 passed, 0 failed**. The CLI tests use an isolated WebSocket app-server boundary; failure notifications are additionally validated against the generated schema. Coverage includes arbitrary calls and full errors, JSON/file/stdin inputs, shared/scoped options, adoption/forks, current-turn messages, pending approvals and replies, raw event follow, capacity/usage/other exits, bounded capacity backoff, no usage retry, per-quota metadata, atomic state, PATH installation, ownership and reconnect recovery. Failing-first observations included the initial generic command/validator/broker absence, scalar JSON coercion, detached stdin being consumed twice, first-turn history reads before materialization, pending requests left unanswered during close, and metadata being carried across different quotas. The corrected behavior is covered by retained tests.
+
+Commands run:
+
+```sh
+npm run protocol
+npm test
+npm run proof
+node scripts/orchestrator-proof.mjs
+node scripts/full-client-proof.mjs
+codex-drive --help  # cwd /tmp/codex-drive-proof
+```
+
+| Native check | Inspected evidence |
+| --- | --- |
+| Generic unwrapped request | `call configRequirements/read null` returned `{requirements:null}`; this method has no named wrapper. |
+| External history adoption | A completed throwaway `codex exec --json` session `01a0f1eb-f8a8-71b2-ad4f-5e1698ddbdcb` was listed with `sourceKinds:["exec"]`, read, adopted and resumed through the server. Steering after tick 1 ended that new turn with `ADOPT-STEERED-OK`; wait exited 0. This proves persisted exec-history adoption, not takeover of a running external process. |
+| Independent fork | The source and its fork each started a new turn. The fork ended with `BRANCH-B-OK` while the source was still running; steering the source then produced `BRANCH-A-OK`. The fork retained its own final message. |
+| Actual approval | A read-only, untrusted, manual-policy turn requested `item/commandExecution/requestApproval`. It appeared in pending and status; `approval.txt` was absent. `respond` accepted it, the file became `APPROVED`, and wait ended with `APPROVAL-OK`. |
+| Raw event stream | `events --follow` included the approval request and turn completion. The final local event snapshot also contained the request. |
+| Earlier steering/recovery | Original exact-loop proof still passed: 3 unique `sleep 15; date` command item IDs before steering completion, against 8 requested; ticks 1 and 2; lost-start-reply and disconnect recovery passed. |
+| Earlier interrupt/resume | Interrupt after ticks 1 and 2 produced interrupted/130, with 2 unique exact sleep commands. Resume used the same thread and a new turn and ended with `RESUMED-OK`. |
+| Earlier detached controls | Detached start/resume, current-message status, steer, interrupt, timeout/124, completed/interrupted waits and waiting without a logger all passed. |
+| PATH | Existing `~/.local/bin/codex-drive` still points to this checkout's `src/cli.mjs`; help from `/tmp/codex-drive-proof` exited 0 and showed the new commands/codes. |
+
+Successful native runs:
+
+- Original proof: `/tmp/codex-drive-proof/run-VJLwcD`, listener **88856**, port **52602**.
+- Detached proof: `/tmp/codex-drive-proof/orchestrator-FtQ9zm`, listener **90645**, port **53314**.
+- Full-client proof: `/tmp/codex-drive-proof/full-client-rLMBSa`, listener **91631**, port **53826**.
+
+[Goal 2 summary](evidence/goal-2-summary.json) records IDs, statuses, exact-loop item counts and cleanup checks. [Native event extract](evidence/goal-2-native.jsonl) retains approval, command, message and lifecycle envelopes. These selected artifacts omit account balances, authentication material and reasoning deltas; complete temporary logs remain in each run directory. Full-client setup initially exposed the server's interactive-only list default and the not-yet-materialized history error; its final run passed. One failed proof's graceful shutdown exceeded the CLI's five-second bound before the process exited; the cleanup routine now records failures and can terminate its own recorded PID if needed.
+
+All proof listeners, detached logger PIDs recorded by the runs, and temporary authentication copies were checked as stopped/removed, including failed attempts. Only owned ports and PIDs were inspected. All driver state and servers were isolated under `/tmp/codex-drive-proof/`. **No test client connected to 127.0.0.1:4700; `gate-speed` and its state were not read or changed.** Existing thread file shapes remain readable without migration.
+
+Deliberate boundaries: methods without orchestration value use generic call/respond rather than dedicated UX; there is no terminal approval UI or realtime-media rendering. External exec/TUI adoption loads persisted history into the server and cannot control a separate live runtime. Hard-kill cleanup and lossless reconnect replay cannot be guaranteed. Aggregate status still fails for an unavailable saved server, and local log readers still scan their files. Capacity continuation checks the latest turn after backoff and skips an advanced thread, but independent raw callers must coordinate mutations because `turn/start` has no generated atomic expected-turn precondition. A wait observes one pinned turn, including a failed capacity turn that an opt-in owner may subsequently retry. No real capacity or usage limit was deliberately triggered; conformant fake messages prove those classifications and exits.

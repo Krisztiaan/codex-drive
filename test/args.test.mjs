@@ -54,17 +54,15 @@ test('invalid command options, duplicate flags, missing values, and counts fail 
   for (const argv of [[], ['unknown'], ['status', '--stop'], ['tail', 'demo', '-x'],
     ['serve', '--port'], ['serve', '--port', '--stop'], ['serve', '--port', '4700', '--port', '4701'],
     ['serve', 'extra'], ['steer', 'demo'], ['interrupt'], ['status', 'one', 'two'],
-    ['tail'], ['resume', 'demo'], [...start, ''], [...start, 'one', 'two']]) {
+    ['tail'], [...start, ''], [...start, 'one', 'two']]) {
     assert.throws(() => parseArgs(argv), Error, JSON.stringify(argv));
   }
 });
 
-test('start requires cwd, model, effort, and log', () => {
-  for (const flag of ['--cwd', '--model', '--effort', '--log']) {
-    const argv = [...start];
-    argv.splice(argv.indexOf(flag), 2);
-    assert.throws(() => parseArgs([...argv, 'Go']), /start requires/);
-  }
+test('server configuration can supply model and effort; start defaults cwd and safety', () => {
+  const result = parseArgs(['start', 'Go']);
+  assert.deepEqual(result.options, { cwd: resolve('.'), sandbox: 'workspace-write', approval: 'on-request' });
+  assert.deepEqual(parseArgs(['resume', 'demo']).positional, ['demo']);
 });
 
 test('ports and tail count have numeric bounds', () => {

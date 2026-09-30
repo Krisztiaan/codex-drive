@@ -15,20 +15,23 @@ export async function fixture(t) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
-  const sockets = new Set(), children = new Set();
+  const sockets = new Set(), children = new Set(), received = [], replies = [];
   const paused = new Set();
   const turns = [{ id: 'turn-1', status: 'completed', items: [{ type: 'agentMessage', id: 'message-1', text: 'PREVIOUS' }], error: null }];
-  let nextTurn = 2, reads = 0, loseStartReply = false;
+  let nextTurn = 2, reads = 0, loseStartReply = false, lostReplyRateLimits = null;
   const threadId = 'thread-1';
+  const threads = new Map([[threadId, turns]]);
+  let nextFork = 1;
   const server = createServer();
   function emit(method, params) { for (const socket of sockets) if (socket.subscribed) socket.write(frame({ method, params })); }
-  function complete(status = 'completed', text = 'CURRENT', turn = turns.at(-1)) {
+  function complete(status = 'completed', text = 'CURRENT', turn = turns.at(-1), error = null) {
+    const owner = [...threads].find(([, history]) => history.includes(turn))?.[0] ?? threadId;
     if (text) {
       const item = { type: 'agentMessage', id: `message-${turn.id}`, text };
-      turn.items.push(item); emit('item/completed', { threadId, turnId: turn.id, item });
+      turn.items.push(item); emit('item/completed', { threadId: owner, turnId: turn.id, item });
     }
-    turn.status = status; turn.error = status === 'failed' ? { message: 'Backend failed' } : null;
-    emit('turn/completed', { threadId, turn: structuredClone(turn) });
+    turn.status = status; turn.error = status === 'failed' ? error ?? { message: 'Backend failed', codexErrorInfo: 'other', additionalDetails: null } : null;
+    emit('turn/completed', { threadId: owner, turn: structuredClone(turn) });
   }
   server.on('upgrade', (request, socket, head) => {
     const accept = createHash('sha1').update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
@@ -50,31 +53,46 @@ export async function fixture(t) {
         if (opcode === 8) { socket.end(Buffer.from([0x88, 0])); return; }
         if (opcode !== 1) continue;
         const message = JSON.parse(body.toString());
+        if (message.id !== undefined && !message.method) { replies.push(message); continue; }
         if (message.id === undefined || !message.method) continue;
+        received.push(message);
         const { id, method, params } = message;
         if (paused.has(method)) continue;
         let result;
         switch (method) {
           case 'initialize': result = {}; break;
-          case 'thread/start': socket.subscribed = true; result = { thread: { id: threadId }, model: params.model }; break;
-          case 'thread/resume': socket.subscribed = true; result = { thread: { id: threadId, turns } }; break;
+          case 'server/diagnostics': result = { diagnostics: ['PASSTHROUGH'] }; break;
+          case 'thread/read': {
+            if (params.threadId === 'missing') { socket.write(frame({ id, error: { code: -32001, message: 'Not found', data: { detail: 'original' } } })); continue; }
+            result = { thread: { id: threadId, cwd: home, turns } }; break;
+          }
+          case 'thread/start': socket.subscribed = true; result = { thread: { id: threadId, cwd: home }, model: params.model }; break;
+          case 'thread/resume': socket.subscribed = true; result = { thread: { id: params.threadId, cwd: home, turns: threads.get(params.threadId) ?? turns } }; break;
+          case 'thread/fork': { const id = `fork-${nextFork++}`; const history = structuredClone(threads.get(params.threadId) ?? turns); threads.set(id, history); result = { thread: { id, cwd: home, turns: history } }; break; }
+          case 'model/list': result = { data: [], nextCursor: null }; break;
+          case 'account/read': result = { account: null, requiresOpenaiAuth: false }; break;
+          case 'account/rateLimits/read': result = { rateLimits: null, rateLimitsByLimitId: null }; break;
+          case 'thread/list': result = { data: [...threads.keys()].map(id => ({ id })), nextCursor: null }; break;
+          case 'thread/archive': case 'thread/unarchive': case 'thread/revert': case 'thread/compact/start': case 'thread/name/set': result = {}; break;
           case 'thread/turns/list': {
             reads++;
-            const data = [...turns].reverse(), offset = Number(params.cursor ?? 0), end = offset + (params.limit ?? data.length);
+            if (!(threads.get(params.threadId) ?? turns).length) { socket.write(frame({ id, error: { code: -32600, message: 'Thread not materialized before first user message' } })); continue; }
+            const data = [...(threads.get(params.threadId) ?? turns)].reverse(), offset = Number(params.cursor ?? 0), end = offset + (params.limit ?? data.length);
             result = { data: data.slice(offset, end), nextCursor: end < data.length ? String(end) : null }; break;
           }
           case 'turn/start': {
             const turn = { id: `turn-${nextTurn++}`, status: 'inProgress', items: [], error: null };
-            turns.push(turn); emit('turn/started', { threadId, turn });
+            const history = threads.get(params.threadId) ?? turns; history.push(turn); socket.turnOwner = true; emit('turn/started', { threadId: params.threadId, turn });
             if (loseStartReply) {
               loseStartReply = false;
+              if (lostReplyRateLimits) { emit('account/rateLimits/updated', { rateLimits: lostReplyRateLimits }); lostReplyRateLimits = null; }
               setTimeout(() => { socket.destroy(); complete('completed', 'RECOVERED'); }, 20);
               continue;
             }
             result = { turn }; break;
           }
-          case 'turn/steer': result = { turnId: params.expectedTurnId }; complete('completed', 'STEERED'); break;
-          case 'turn/interrupt': result = {}; complete('interrupted', null); break;
+          case 'turn/steer': result = { turnId: params.expectedTurnId }; complete('completed', 'STEERED', (threads.get(params.threadId) ?? turns).at(-1)); break;
+          case 'turn/interrupt': result = {}; complete('interrupted', null, (threads.get(params.threadId) ?? turns).at(-1)); break;
           default: socket.write(frame({ id, error: { code: -32601, message: `Unexpected fixture method ${method}` } })); continue;
         }
         socket.write(frame({ id, result }));
@@ -87,8 +105,9 @@ export async function fixture(t) {
   const state = { name: 'demo', threadId, turnId: 'turn-1', cwd: home, model: 'gpt-6.1-sol', effort: 'low', sandbox: 'workspace-write', approval: 'on-request', addDirs: [], logPath: join(home, 'events.jsonl'), port, status: 'completed', lastAgentMessage: 'PREVIOUS', lastEventTime: null };
   function seed(overrides = {}) { writeFileSync(join(home, 'threads/demo.json'), JSON.stringify({ ...state, ...overrides })); }
   seed();
-  function launch(args, { cwd } = {}) {
-    const child = spawn(process.execPath, [resolve('src/cli.mjs'), ...args], { env: { ...process.env, CODEX_DRIVE_HOME: home }, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  function launch(args, { cwd, stdin } = {}) {
+    const child = spawn(process.execPath, [resolve('src/cli.mjs'), ...args], { env: { ...process.env, CODEX_DRIVE_HOME: home }, cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    if (stdin !== undefined) child.stdin.end(stdin);
     children.add(child); let stdout = '', stderr = '';
     child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });
     const result = new Promise((resolve, reject) => {
@@ -109,7 +128,7 @@ export async function fixture(t) {
     await new Promise(resolve => server.close(resolve));
     rmSync(home, { recursive: true, force: true });
   });
-  return { home, port, state, seed, turns, complete, launch, command, hasRead: () => reads > 0, pause(method) { paused.add(method); }, loseNextStartReply() { loseStartReply = true; }, disconnect() { for (const socket of sockets) socket.destroy(); } };
+  return { home, port, state, seed, turns, threads, received, replies, complete, emit, request(method, params, id = 'server-1') { for (const socket of sockets) if (socket.turnOwner) socket.write(frame({ id, method, params })); }, launch, command, hasRead: () => reads > 0, pause(method) { paused.add(method); }, loseNextStartReply(rateLimits = null) { loseStartReply = true; lostReplyRateLimits = rateLimits; }, disconnect() { for (const socket of sockets) socket.destroy(); } };
 }
 export async function until(check, label = 'condition') {
   for (let n = 0; n < 200; n++) { const value = await check(); if (value) return value; await delay(25); }
