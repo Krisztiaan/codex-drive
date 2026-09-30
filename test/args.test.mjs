@@ -84,3 +84,12 @@ test('invalid sandbox, approval policy, and unsafe names are rejected', () => {
     assert.throws(() => parseArgs([...start, '--name', name, 'Go']), /Invalid thread name/);
   }
 });
+
+test('wait supports fractional positive timeouts and start/resume accept detach', () => {
+  assert.equal(parseArgs(['wait', 'demo', '--timeout', '0.25']).options.timeout, '0.25');
+  for (const value of ['-1', '0', 'NaN', 'Infinity', 'abc', '9999999999']) {
+    assert.throws(() => parseArgs(['wait', 'demo', '--timeout', value]), /--timeout/);
+  }
+  assert.equal(parseArgs([...start, '--detach', 'Go']).options.detach, true);
+  assert.equal(parseArgs(['resume', 'demo', '--detach', 'Go']).options.detach, true);
+});

@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from './args.mjs';
 import { Store, applyEvent } from './state.mjs';
 import { Rpc } from './rpc.mjs';
 import { serve } from './server.mjs';
 
+const detachedWorker = typeof process.send === 'function';
 const print = value => console.log(JSON.stringify(value));
 const input = text => [{ type: 'text', text, text_elements: [] }];
 const terminal = status => ['completed', 'failed', 'interrupted'].includes(status);
@@ -26,23 +29,30 @@ function handleRequest(rpc, event) {
   }
   rpc.send({ id: event.id, result });
 }
-async function connection(port) {
+async function connection(port, signal) {
   const rpc = new Rpc(port);
   rpc.on('event', event => {
     if (event.id !== undefined && event.method) handleRequest(rpc, event);
   });
-  try { await rpc.connect(); return rpc; }
+  try { await rpc.connect(signal); return rpc; }
   catch (e) { rpc.close(); throw e; }
 }
-async function snapshot(rpc, state) {
-  const { data } = await rpc.request('thread/turns/list', { threadId: state.threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' });
-  const turn = data[0];
-  if (!turn) return;
+async function snapshot(rpc, state, signal, targetTurnId) {
+  let cursor, turn;
+  do {
+    const page = await rpc.request('thread/turns/list', { threadId: state.threadId, limit: targetTurnId ? 20 : 1, sortDirection: 'desc', itemsView: 'full', ...(cursor ? { cursor } : {}) }, { signal });
+    turn = targetTurnId ? page.data.find(turn => turn.id === targetTurnId) : page.data[0];
+    cursor = page.nextCursor;
+  } while (!turn && cursor);
+  if (!turn) {
+    if (targetTurnId) throw new Error(`Turn ${targetTurnId} is unavailable`);
+    return;
+  }
   state.turnId = turn.id;
   state.status = turn.status === 'inProgress' ? 'running' : turn.status;
   state.error = turn.error;
   const message = turn.items.filter(item => item.type === 'agentMessage' && item.text.trim()).at(-1);
-  if (message) state.lastAgentMessage = message.text.trim().split('\n').filter(Boolean).at(-1) ?? '';
+  state.lastAgentMessage = message ? message.text.trim().split('\n').filter(Boolean).at(-1) ?? null : null;
 }
 async function runAttached(store, options, key, prompt, resume) {
   let state = resume ? store.read(key) : null;
@@ -111,7 +121,7 @@ async function runAttached(store, options, key, prompt, resume) {
       });
       state = { name: options.name ?? null, threadId: result.thread.id, turnId: null, cwd: options.cwd, model: result.model,
         effort: options.effort, sandbox: options.sandbox, approval: options.approval, addDirs: options['add-dir'] ?? [],
-        logPath, port: Number(options.port ?? 4700), status: 'starting', lastEventTime: null, lastAgentMessage: '' };
+        logPath, port: Number(options.port ?? 4700), status: 'starting', lastEventTime: null, lastAgentMessage: null };
       if (!options.name) {
         const canonicalUnlock = store.lock(state.threadId);
         unlock(); unlock = canonicalUnlock;
@@ -135,6 +145,9 @@ async function runAttached(store, options, key, prompt, resume) {
           await rpc.request('thread/resume', { threadId: state.threadId });
           await snapshot(rpc, state);
           if (state.turnId && state.turnId !== priorTurnId) {
+            // History is authoritative through this snapshot; older buffered lifecycle events must not rewind it.
+            buffered.length = 0;
+            state.lastEventTime = new Date().toISOString();
             turn = { id: state.turnId, status: state.status === 'running' ? 'inProgress' : state.status, error: state.error };
             recovered = true;
             log({ method: 'driver/startRecovered', params: { threadId: state.threadId, turnId: state.turnId, status: state.status } });
@@ -144,11 +157,17 @@ async function runAttached(store, options, key, prompt, resume) {
       }
       if (!recovered) throw new Error(`turn/start outcome unconfirmed; input was not replayed. Inspect status before retrying: ${error.message}`);
     }
+    if (state.turnId !== turn.id) state.lastAgentMessage = null;
     state.turnId = turn.id; state.status = turn.status === 'inProgress' ? 'running' : turn.status; state.error = turn.error;
     ready = true;
     for (const event of buffered.splice(0)) reduce(event);
     store.save(state);
-    print({ threadId: state.threadId, turnId: state.turnId });
+    const ids = { threadId: state.threadId, turnId: state.turnId };
+    if (detachedWorker) {
+      state.driverPid = process.pid; store.save(state);
+      log({ method: 'driver/attached', params: { ...ids, pid: process.pid } });
+      process.send({ ids }, () => process.disconnect());
+    } else print(ids);
     if (terminal(state.status)) resolveDone();
     // If the socket closed in the small interval before ready, trigger recovery now.
     if (rpc.socket.readyState !== WebSocket.OPEN) rpc.emit('disconnect');
@@ -156,6 +175,44 @@ async function runAttached(store, options, key, prompt, resume) {
     if (state.status === 'failed') throw new Error(`Turn failed: ${JSON.stringify(state.error)}`);
     if (state.status === 'interrupted') process.exitCode = 130;
   } finally { shuttingDown = true; rpc?.close(); await recoveryTask; rpc?.close(); unlock(); }
+}
+async function waitForTurn(store, options, key) {
+  const state = store.read(key);
+  if (options.port && +options.port !== state.port) throw new Error('Port differs from thread server');
+  const controller = new AbortController();
+  const timer = options.timeout ? setTimeout(() => controller.abort(new Error('Wait timed out')), Number(options.timeout) * 1000) : null;
+  let rpc;
+  try {
+    let targetTurnId, failures = 0;
+    for (;;) {
+      try {
+        if (!rpc) {
+          rpc = await connection(state.port, controller.signal);
+          rpc.on('event', event => {
+            const params = event.params, eventTurnId = params?.turnId ?? params?.turn?.id;
+            if (params?.threadId === state.threadId && (!targetTurnId || !eventTurnId || eventTurnId === targetTurnId)) state.lastEventTime = new Date().toISOString();
+          });
+          await rpc.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal });
+        }
+        await snapshot(rpc, state, controller.signal, targetTurnId);
+        if (!state.turnId) throw new Error('Thread has no current turn');
+        targetTurnId ??= state.turnId;
+        failures = 0;
+        if (terminal(state.status)) break;
+        await delay(100, undefined, { signal: controller.signal });
+      } catch (error) {
+        if (controller.signal.aborted || error.rpcError || (rpc?.socket.readyState === WebSocket.OPEN)) throw error;
+        rpc?.close(); rpc = null;
+        if (++failures > 15) throw error;
+        await delay(100, undefined, { signal: controller.signal });
+      }
+    }
+    print(state);
+    process.exitCode = state.status === 'completed' ? 0 : state.status === 'interrupted' ? 130 : 1;
+  } catch (error) {
+    if (!controller.signal.aborted) throw error;
+    print({ ...state, timedOut: true }); process.exitCode = 124;
+  } finally { clearTimeout(timer); rpc?.close(); }
 }
 function readable(event) {
   const p = event.params ?? {}, item = p.item;
@@ -166,19 +223,63 @@ function readable(event) {
   if (event.method === 'error' || event.method === 'warning' || event.method?.startsWith('driver/')) return `${event.method}: ${JSON.stringify(p)}`;
   return null;
 }
+async function detach(argv) {
+  let literal = false;
+  const args = argv.filter(arg => {
+    if (arg === '--') literal = true;
+    return literal || arg !== '--detach';
+  });
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], {
+    detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  });
+  const ids = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.on('message', message => { if (message.ids) resolve(message.ids); else if (message.error) reject(new Error(message.error)); });
+    child.once('exit', (code, signal) => reject(new Error(`Detached logger exited before starting (code ${code}, signal ${signal})`)));
+  });
+  child.unref();
+  print(ids);
+}
+const usage = `Usage: codex-drive <command>
+  serve [--port 4700] [--stop]
+  start --cwd <dir> --model <m> --effort <e> --log <file> [--name <n>] [--detach] "<prompt>"
+        [--sandbox workspace-write|read-only|danger-full-access] [--approval on-request|untrusted|never] [--add-dir <dir>]
+  resume <name|threadId> [--detach] "<text>"
+  wait <name|threadId> [--timeout <seconds>]
+  status [<name|threadId>]
+  tail <name|threadId> [-n 20]
+  steer <name|threadId> [--turn <turnId>] "<text>"
+  interrupt <name|threadId> [--turn <turnId>]
+Server commands accept --port; existing threads use their saved port.
+Defaults: sandbox workspace-write, approval on-request. --cd aliases --cwd.
+Wait exits: completed 0, failed/error 1, interrupted 130, timeout 124.`;
 async function main() {
+  if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
+  if (detachedWorker) {
+    const logPath = command === 'start' ? options.log : new Store().read(positional[0]).logPath;
+    mkdirSync(dirname(logPath), { recursive: true });
+    console.error = (...parts) => appendFileSync(logPath, JSON.stringify({ receivedAt: new Date().toISOString(), method: 'driver/diagnostic', params: { message: parts.join(' ') } }) + '\n', { mode: 0o600 });
+  }
+  if (options.detach) {
+    warning(command === 'start' ? options : new Store().read(positional[0]));
+    await detach(process.argv.slice(2)); return;
+  }
   if (command === 'serve') { print(await serve(Number(options.port ?? 4700), options.stop)); return; }
   const store = new Store();
   if (command === 'start') { await runAttached(store, options, options.name ?? `pending-${process.pid}`, positional[0], false); return; }
   if (command === 'resume') { const state = store.read(positional[0]); if (options.port && +options.port !== state.port) throw new Error('Port differs from thread server'); await runAttached(store, options, state.name ?? state.threadId, positional[1], true); return; }
+  if (command === 'wait') { await waitForTurn(store, options, positional[0]); return; }
   if (command === 'tail') {
     const state = store.read(positional[0]);
-    const lines = readFileSync(state.logPath, 'utf8').trim().split('\n').filter(Boolean).map(line => readable(JSON.parse(line))).filter(Boolean);
+    const contents = readFileSync(state.logPath, 'utf8');
+    const committed = contents.slice(0, contents.lastIndexOf('\n') + 1);
+    const lines = committed.split('\n').filter(Boolean).map(line => readable(JSON.parse(line))).filter(Boolean);
     console.log(lines.slice(-Number(options.n ?? 20)).join('\n')); return;
   }
   const states = positional.length ? [store.read(positional[0])] : store.all();
   if (!states.length) { print([]); return; }
+  if (options.port && states.some(state => state.port !== Number(options.port))) throw new Error('Port differs from thread server');
   const port = Number(options.port ?? states[0].port);
   const rpc = await connection(port);
   try {
@@ -203,4 +304,7 @@ async function main() {
     else print(await rpc.request('turn/interrupt', { threadId: state.threadId, turnId }));
   } finally { rpc.close(); }
 }
-main().catch(error => { console.error(`codex-drive: ${error.message}`); process.exitCode = 1; });
+main().catch(error => {
+  if (detachedWorker && process.connected) { process.send({ error: error.message }, () => process.disconnect()); }
+  console.error(`codex-drive: ${error.message}`); process.exitCode = 1;
+});

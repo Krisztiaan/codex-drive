@@ -145,3 +145,31 @@ test('a dead owner lock is recovered', t => {
   assert.equal(readFileSync(store.path('demo') + '.lock', 'utf8'), String(process.pid));
   release();
 });
+
+test('thread names cannot shadow a canonical thread ID', t => {
+  const { store } = fixture(t);
+  store.create(thread({ name: 'first', threadId: 'id-first' }));
+  assert.throws(() => store.create(thread({ name: 'id-first', threadId: 'id-second' })), /collid/i);
+  assert.equal(store.read('id-first').name, 'first');
+});
+
+test('a concurrently created state is either absent or complete for readers', async t => {
+  const { store, home } = fixture(t);
+  const { spawn } = await import('node:child_process');
+  const { pathToFileURL } = await import('node:url');
+  const { resolve } = await import('node:path');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const source = `import { Store } from ${JSON.stringify(pathToFileURL(resolve('src/state.mjs')).href)}; new Store(${JSON.stringify(home)}).create({name:'demo',threadId:'id-created',payload:'x'.repeat(32*1024*1024)});`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: 'ignore' });
+  let done = false;
+  const exited = new Promise(resolve => child.once('exit', code => { done = true; resolve(code); }));
+  try {
+    while (!done) {
+      try { assert.equal(store.read('demo').payload.length, 32 * 1024 * 1024); }
+      catch (error) { if (!error.message.startsWith('Unknown thread:')) throw error; }
+      await delay(1);
+    }
+    assert.equal(await exited, 0);
+    assert.equal(store.read('demo').payload.length, 32 * 1024 * 1024);
+  } finally { if (!done) child.kill('SIGTERM'); await exited; }
+});

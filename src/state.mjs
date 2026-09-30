@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, existsSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, linkSync, readdirSync, existsSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -19,14 +19,19 @@ export class Store {
   all() { return readdirSync(this.dir).filter(f => f.endsWith('.json')).map(f => JSON.parse(readFileSync(join(this.dir, f), 'utf8'))); }
   read(key) {
     const path = this.path(key);
-    const state = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : this.all().find(s => s.threadId === key);
+    const state = this.all().find(s => s.threadId === key) ?? (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null);
     if (!state) throw new Error(`Unknown thread: ${key}`);
     return state;
   }
   create(state) {
     const key = state.name ?? state.threadId;
-    const fd = openSync(this.path(key), 'wx', 0o600);
-    try { writeFileSync(fd, JSON.stringify(state, null, 2) + '\n'); } finally { closeSync(fd); }
+    this.path(key);
+    if (!existsSync(this.path(key)) && this.all().some(s => s.threadId === key || s.name === state.threadId)) throw new Error('Thread name collides with a canonical thread ID');
+    const path = this.path(key), temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+      linkSync(temporary, path); // Publish a complete file without replacing an existing name.
+    } finally { if (existsSync(temporary)) unlinkSync(temporary); }
     return state;
   }
   save(state) { atomicWrite(this.path(state.name ?? state.threadId), state); }
@@ -46,13 +51,16 @@ export function applyEvent(state, event, time = new Date().toISOString()) {
   const p = event.params;
   if (p?.threadId !== state.threadId) return false;
   state.lastEventTime = time;
-  if (event.method === 'turn/started') { state.turnId = p.turn.id; state.status = 'running'; }
+  if (event.method === 'turn/started') {
+    if (state.turnId !== p.turn.id) state.lastAgentMessage = null;
+    state.turnId = p.turn.id; state.status = 'running'; state.error = null;
+  }
   if (event.method === 'turn/completed' && p.turn.id === state.turnId) {
     state.status = p.turn.status;
     state.error = p.turn.error;
   }
   if (event.method === 'item/completed' && p.turnId === state.turnId && p.item?.type === 'agentMessage') {
-    state.lastAgentMessage = p.item.text.trim().split('\n').filter(Boolean).at(-1) ?? '';
+    state.lastAgentMessage = p.item.text.trim().split('\n').filter(Boolean).at(-1) ?? null;
   }
   return true;
 }

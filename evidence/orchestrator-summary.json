@@ -1,0 +1,235 @@
+{
+  "run": "/tmp/codex-drive-proof/orchestrator-aa2fnG",
+  "date": "2026-09-30T09:50:21.378Z",
+  "node": "v26.8.2",
+  "model": "gpt-6.1-sol",
+  "effort": "low",
+  "steps": [
+    {
+      "command": "serve",
+      "exitCode": 0,
+      "output": {
+        "pid": 50906,
+        "port": 59980
+      }
+    },
+    {
+      "command": "start",
+      "exitCode": 0,
+      "warningPrinted": true,
+      "output": {
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b8-e803-78f2-b076-88fb3e5df6c2"
+      }
+    },
+    {
+      "command": "status",
+      "exitCode": 0,
+      "output": {
+        "name": "detached",
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b8-e803-78f2-b076-88fb3e5df6c2",
+        "cwd": "/tmp/codex-drive-proof/orchestrator-aa2fnG/work",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "sandbox": "danger-full-access",
+        "approval": "never",
+        "addDirs": [],
+        "logPath": "/tmp/codex-drive-proof/orchestrator-aa2fnG/detached.jsonl",
+        "port": 59980,
+        "status": "running",
+        "lastEventTime": "2026-09-30T09:50:22.221Z",
+        "lastAgentMessage": null,
+        "error": null,
+        "driverPid": 50952
+      }
+    },
+    {
+      "command": "wait",
+      "exitCode": 124,
+      "output": {
+        "name": "detached",
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b8-e803-78f2-b076-88fb3e5df6c2",
+        "cwd": "/tmp/codex-drive-proof/orchestrator-aa2fnG/work",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "sandbox": "danger-full-access",
+        "approval": "never",
+        "addDirs": [],
+        "logPath": "/tmp/codex-drive-proof/orchestrator-aa2fnG/detached.jsonl",
+        "port": 59980,
+        "status": "running",
+        "lastEventTime": "2026-09-30T09:50:22.365Z",
+        "lastAgentMessage": null,
+        "error": null,
+        "driverPid": 50952,
+        "timedOut": true
+      }
+    },
+    {
+      "command": "steer",
+      "exitCode": 0,
+      "output": {
+        "turnId": "01a0f1b8-e803-78f2-b076-88fb3e5df6c2"
+      }
+    },
+    {
+      "command": "wait (concurrent with steer)",
+      "exitCode": 0,
+      "output": {
+        "name": "detached",
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b8-e803-78f2-b076-88fb3e5df6c2",
+        "cwd": "/tmp/codex-drive-proof/orchestrator-aa2fnG/work",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "sandbox": "danger-full-access",
+        "approval": "never",
+        "addDirs": [],
+        "logPath": "/tmp/codex-drive-proof/orchestrator-aa2fnG/detached.jsonl",
+        "port": 59980,
+        "status": "completed",
+        "lastEventTime": "2026-09-30T09:50:56.242Z",
+        "lastAgentMessage": "DETACHED-STEERED-OK",
+        "error": null,
+        "driverPid": 50952
+      }
+    },
+    {
+      "command": "wait",
+      "exitCode": 0,
+      "output": {
+        "name": "detached",
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b8-e803-78f2-b076-88fb3e5df6c2",
+        "cwd": "/tmp/codex-drive-proof/orchestrator-aa2fnG/work",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "sandbox": "danger-full-access",
+        "approval": "never",
+        "addDirs": [],
+        "logPath": "/tmp/codex-drive-proof/orchestrator-aa2fnG/detached.jsonl",
+        "port": 59980,
+        "status": "completed",
+        "lastEventTime": "2026-09-30T09:50:56.347Z",
+        "lastAgentMessage": "DETACHED-STEERED-OK",
+        "error": null,
+        "driverPid": 50952
+      }
+    },
+    {
+      "command": "resume",
+      "exitCode": 0,
+      "warningPrinted": true,
+      "output": {
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b9-6de3-77d2-a2e5-0d8413465f87"
+      }
+    },
+    {
+      "command": "status",
+      "exitCode": 0,
+      "output": {
+        "name": "detached",
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b9-6de3-77d2-a2e5-0d8413465f87",
+        "cwd": "/tmp/codex-drive-proof/orchestrator-aa2fnG/work",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "sandbox": "danger-full-access",
+        "approval": "never",
+        "addDirs": [],
+        "logPath": "/tmp/codex-drive-proof/orchestrator-aa2fnG/detached.jsonl",
+        "port": 59980,
+        "status": "running",
+        "lastEventTime": "2026-09-30T09:50:56.537Z",
+        "lastAgentMessage": null,
+        "error": null,
+        "driverPid": 51294
+      }
+    },
+    {
+      "command": "interrupt",
+      "exitCode": 0,
+      "output": {}
+    },
+    {
+      "command": "wait",
+      "exitCode": 130,
+      "output": {
+        "name": "detached",
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b9-6de3-77d2-a2e5-0d8413465f87",
+        "cwd": "/tmp/codex-drive-proof/orchestrator-aa2fnG/work",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "sandbox": "danger-full-access",
+        "approval": "never",
+        "addDirs": [],
+        "logPath": "/tmp/codex-drive-proof/orchestrator-aa2fnG/detached.jsonl",
+        "port": 59980,
+        "status": "interrupted",
+        "lastEventTime": "2026-09-30T09:51:14.249Z",
+        "lastAgentMessage": "tick 1",
+        "error": null,
+        "driverPid": 51294
+      }
+    },
+    {
+      "command": "steer",
+      "exitCode": 0,
+      "output": {
+        "turnId": "01a0f1b9-b39b-7a20-8cde-74dc81ff3782"
+      }
+    },
+    {
+      "command": "wait without logger",
+      "exitCode": 0,
+      "output": {
+        "name": "detached",
+        "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+        "turnId": "01a0f1b9-b39b-7a20-8cde-74dc81ff3782",
+        "cwd": "/tmp/codex-drive-proof/orchestrator-aa2fnG/work",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "sandbox": "danger-full-access",
+        "approval": "never",
+        "addDirs": [],
+        "logPath": "/tmp/codex-drive-proof/orchestrator-aa2fnG/detached.jsonl",
+        "port": 59980,
+        "status": "completed",
+        "lastEventTime": "2026-09-30T09:51:28.569Z",
+        "lastAgentMessage": "NO-LOGGER-OK",
+        "error": null,
+        "driverPid": 51294
+      }
+    },
+    {
+      "command": "serve",
+      "exitCode": 0,
+      "output": {
+        "port": 59980,
+        "stopped": [
+          50906
+        ]
+      }
+    }
+  ],
+  "server": {
+    "pid": 50906,
+    "port": 59980
+  },
+  "detachedObserver": {
+    "threadId": "01a0f1b8-e64a-7bc0-b5d8-585298a06f53",
+    "turnId": "01a0f1b9-b39b-7a20-8cde-74dc81ff3782",
+    "attachedLoggerStopped": true
+  },
+  "passed": true,
+  "cleanup": {
+    "port": 59980,
+    "stopped": [
+      50906
+    ]
+  }
+}

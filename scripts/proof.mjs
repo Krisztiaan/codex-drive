@@ -67,6 +67,7 @@ async function start(name) {
 }
 try {
   const probe = createServer(); await new Promise(r => probe.listen(0, '127.0.0.1', r)); serverPort = probe.address().port; await new Promise(r => probe.close(r));
+  assert.notEqual(serverPort, 4700);
   const startups = await Promise.all([launch(['serve', '--port', String(serverPort)]).result, launch(['serve', '--port', String(serverPort)]).result]);
   const successes = startups.filter(r => r.code === 0).map(r => JSON.parse(r.stdout));
   const started = successes.find(r => r.pid);

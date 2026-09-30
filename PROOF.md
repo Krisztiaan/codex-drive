@@ -1,5 +1,7 @@
 # Live acceptance proof
 
+The latest verification is the [2026-09-30 orchestration follow-up](#2026-09-30-orchestration-follow-up) below. The first section preserves the original 2026-09-29 evidence.
+
 Run date: 2026-09-29T19:47:07.404Z. Runtime: Node v26.8.2, codex-cli 0.159.0, requested model `gpt-6.1-sol`, effort `low`. The server returned the requested model; no model-reroute notification was logged. All goal work ran in fresh subdirectories of `/tmp/codex-drive-proof/run-r9zC52` with explicit `danger-full-access` and approval `never`.
 
 The exact prompt for both loops was:
@@ -52,3 +54,47 @@ Inspected steering log sequence (local receipt timestamps):
 [Steering/resume event extract](evidence/steer.jsonl), [interrupt event extract](evidence/interrupt.jsonl), and [run summary](evidence/summary.json) retain the raw server event fields and receipt times needed to inspect these conclusions. Sleep-command counts use unique command item IDs for the exact `sleep 15; date` invocation; those IDs are recorded in the summary. The complete original JSONL logs remain in the run directory above. The extracts include command starts/completions and agent messages; they contain no authentication material.
 
 A command already in progress after tick 2 may finish before steering is handled; the agent emitted no tick 3 in this run. Connection gaps are recorded explicitly; missed notifications are not claimed to have been replayed. These results prove this CLI/protocol combination on the tested runtime, not guaranteed model compliance for arbitrary prompts.
+
+## 2026-09-30 orchestration follow-up
+
+Implementation baseline: `b7c126e`, followed by this commit's changes. Node v26.8.2 and codex-cli 0.159.0. All checks used temporary state and isolated Codex homes under `/tmp/codex-drive-proof/`. No client connected to the live server on port 4700, and no shared driver state file was read or changed. `gate-speed` was excluded entirely.
+
+Each functional change began with a failing behavior test, then implementation and a passing check:
+
+| Regression | Observed red result | Passing behavior |
+| --- | --- | --- |
+| Resume message | `PREVIOUS` returned instead of `null` | Only the current turn's message or null; legacy state still readable. |
+| Wait | Returned while the backend turn still ran | Rejoins without a logger, prints final JSON, returns 0/1/130 for completed/failed/interrupted. |
+| Timeout | `--timeout` rejected; exited 1 | Exits 124 with `timedOut: true`, cancels outstanding RPCs, leaves the turn running. |
+| Reconnected wait | Timed out or followed a newer turn | Pins the original turn across disconnects and paginated history containing 25 newer turns. |
+| Detach | `--detach` rejected | Detached start/resume return ready IDs, while status, wait, steer and interrupt continue to work. |
+| Detached warning | Invoking stderr was empty | Full-access warning appears on stderr; child diagnostics remain JSONL. |
+| Alias collision | Creating a name matching another thread ID succeeded | Rejects shadowing; canonical IDs take precedence for existing files. |
+| Fast lost start reply | Logger still ran after recovered completion | Recovered terminal snapshot cannot be rewound by older buffered events. |
+| Concurrent initial state | Reader saw `Unexpected end of JSON input` | Readers see absent or complete state; duplicate protection remains. |
+| Partial log append | Tail failed on an unterminated final row | Ignores only unfinished trailing data; complete corrupt rows still fail. |
+| Port override | Status silently succeeded on another saved port | Mismatches fail before connecting. |
+| Wait event time | Returned cached `OLD` time | Returned JSON includes receipt time of observed selected-thread events, without state writes. |
+| Help/PATH | Help failed; installer was absent | Help works from another directory; installation is repeatable and refuses foreign occupants. |
+
+Final checks: `npm test` **36 passed, 0 failed**; `git diff --check` passed. CLI tests use a controllable WebSocket app-server boundary and real subprocesses/files. The state-creation race uses concurrent writer/reader processes. These tests are separate from native model acceptance.
+
+```sh
+npm test
+node scripts/proof.mjs
+node scripts/orchestrator-proof.mjs
+node scripts/install.mjs
+# From /tmp/codex-drive-proof/:
+command -v codex-drive
+codex-drive --help
+```
+
+The original exact `sleep 15; date` proof passed on port **64977**: steering after tick 2 produced `STEERED-OK` and completed after 3 unique loop-command items; interrupt after tick 2 reported interrupted after 2 unique loop-command items; resume produced `RESUMED-OK`. It also recovered an accepted start with a dropped reply and a disconnect after tick 1. Full logs: `/tmp/codex-drive-proof/run-gKj0DY`. [Summary](evidence/2026-09-30-summary.json), [steering/resume extract](evidence/2026-09-30-steer.jsonl), [interrupt extract](evidence/2026-09-30-interrupt.jsonl). Counts use unique IDs for the exact loop command, recorded in the summary.
+
+The final orchestrator proof passed on port **59980**. Detached start returned before the loop completed; status showed running with a null current message; a 0.2-second wait exited 124 without interruption. Steering after tick 2 produced `DETACHED-STEERED-OK`, and a concurrent wait exited 0 with fresh event time. Detached resume reused the thread, changed the turn, and initially reported a null message. Interrupt produced status interrupted and wait exit 130. A further turn continued after its attached logger was explicitly stopped; a separate wait then rejoined and returned `NO-LOGGER-OK`, exit 0. Detached full-access stderr warnings were checked. Full logs: `/tmp/codex-drive-proof/orchestrator-aa2fnG`. [Command/status summary](evidence/orchestrator-summary.json), [detached event extract](evidence/orchestrator.jsonl).
+
+The first orchestrator run also passed at `/tmp/codex-drive-proof/orchestrator-0LE2hs` (port 61856); the final rerun above adds the warning and event-time assertions. Both isolated servers and the original-proof server were stopped by their recorded native PIDs, and temporary authentication copies were removed. No process-name selection was used.
+
+PATH installation resolves `/Users/krisztiaan/.local/bin/codex-drive` to `/Users/krisztiaan/dev/codex-drive/src/cli.mjs`. The actual installed command printed usage and exited 0 from another directory, without requiring a server. Unit installation checks additionally preserve existing regular files, directories, foreign links and broken links.
+
+Deliberately unchanged: aggregate status fails if any saved server is unreachable; tail scans the whole log; connection gaps do not promise lossless replay; approvals remain noninteractive. The concurrent, unrelated `GOAL-2.md` is left unmodified and uncommitted.
