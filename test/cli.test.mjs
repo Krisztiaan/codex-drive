@@ -59,7 +59,7 @@ test('detached start and resume return IDs while status, wait, steer and interru
   const f = await fixture(t);
   const { join } = await import('node:path');
   const { readFileSync } = await import('node:fs');
-  const started = await f.command(['start', '--port', String(f.port), '--cwd', f.home, '--model', 'gpt-6.1-sol', '--effort', 'low', '--sandbox', 'danger-full-access', '--approval', 'never', '--name', 'background', '--log', join(f.home, 'background.jsonl'), '--detach', 'Continue']);
+  const started = await f.command(['start', '--port', String(f.port), '--cwd', f.home, '--model', 'gpt-6.1-sol', '--effort', 'low', '--name', 'background', '--log', join(f.home, 'background.jsonl'), '--detach', 'Continue']);
   assert.equal(started.code, 0, started.stderr);
   assert.match(started.stderr, /WARNING: danger-full-access/);
   const ids = JSON.parse(started.stdout);
@@ -108,7 +108,8 @@ test('help succeeds from another directory without requiring a server or state l
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /wait.*--timeout/);
   assert.match(result.stdout, /--detach/);
-  assert.match(result.stdout, /workspace-write/);
+  assert.match(result.stdout, /Defaults: --sandbox danger-full-access, --approval never, --request-policy approve/);
+  assert.match(result.stdout, /--request-policy manual\|decline/);
 });
 
 test('wait immediately reports already-ended turns with completed, failed and interrupted exit codes', async t => {

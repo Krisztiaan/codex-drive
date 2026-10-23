@@ -19,7 +19,7 @@ const approval = { id: 18, method: 'item/commandExecution/requestApproval', para
 
 test('manual requests are listed and an external response reaches the original connection and id', async t => {
   const dir = home(t), rpc = transport(), logs = [];
-  const broker = new RequestBroker({ home: dir, log: event => logs.push(event) });
+  const broker = new RequestBroker({ home: dir, policy: 'manual', log: event => logs.push(event) });
   await broker.start(); t.after(() => broker.close());
   broker.handle(rpc, approval);
   const pending = pendingRequests(dir, 'thread-a');
@@ -36,7 +36,7 @@ test('manual requests are listed and an external response reaches the original c
 });
 
 test('invalid responses stay pending and future requests can be answered with an explicit protocol error', async t => {
-  const dir = home(t), rpc = transport(), broker = new RequestBroker({ home: dir });
+  const dir = home(t), rpc = transport(), broker = new RequestBroker({ home: dir, policy: 'manual' });
   await broker.start(); t.after(() => broker.close());
   broker.handle(rpc, approval);
   const id = broker.pending()[0].requestId;
@@ -51,7 +51,7 @@ test('invalid responses stay pending and future requests can be answered with an
 });
 
 test('server resolution removes only its connection request and disconnect cancels only that connection', async t => {
-  const dir = home(t), logs = [], a = transport(), b = transport(), broker = new RequestBroker({ home: dir, log: e => logs.push(e) });
+  const dir = home(t), logs = [], a = transport(), b = transport(), broker = new RequestBroker({ home: dir, policy: 'manual', log: e => logs.push(e) });
   await broker.start(); t.after(() => broker.close());
   broker.handle(a, approval); broker.handle(b, approval);
   const [first, second] = broker.pending();
@@ -67,8 +67,8 @@ test('server resolution removes only its connection request and disconnect cance
   assert.deepEqual(c.sent, [{ id: 18, result: { decision: 'decline' } }]);
 });
 
-test('explicit approval policy answers approvals but leaves tools and input manual', async t => {
-  const dir = home(t), rpc = transport(), broker = new RequestBroker({ home: dir, policy: 'approve' });
+test('default approval policy answers approvals but leaves tools and input manual', async t => {
+  const dir = home(t), rpc = transport(), broker = new RequestBroker({ home: dir });
   await broker.start(); t.after(() => broker.close());
   broker.handle(rpc, approval);
   broker.handle(rpc, { id: 19, method: 'item/fileChange/requestApproval', params: { threadId: 'thread-a' } });
@@ -105,7 +105,7 @@ test('decline policy replies follow the schema and unsupported policy shapes rem
 });
 
 test('repeated server request delivery does not permit duplicate replies and closing removes owner artifacts', async t => {
-  const dir = home(t), rpc = transport(), logs = [], broker = new RequestBroker({ home: dir, log: e => logs.push(e) });
+  const dir = home(t), rpc = transport(), logs = [], broker = new RequestBroker({ home: dir, policy: 'manual', log: e => logs.push(e) });
   await broker.start(); t.after(() => broker.close());
   broker.handle(rpc, approval); broker.handle(rpc, approval);
   assert.equal(pendingRequests(dir).length, 1);
@@ -118,7 +118,7 @@ test('repeated server request delivery does not permit duplicate replies and clo
 });
 
 test('closing answers each pending live request with a protocol error before removing it', async t => {
-  const dir = home(t), rpc = transport(), broker = new RequestBroker({ home: dir });
+  const dir = home(t), rpc = transport(), broker = new RequestBroker({ home: dir, policy: 'manual' });
   await broker.start(); t.after(() => broker.close());
   broker.handle(rpc, approval);
   broker.handle(rpc, { id: 'auth-1', method: 'account/chatgptAuthTokens/refresh', params: {} });
@@ -137,7 +137,7 @@ test('closing answers each pending live request with a protocol error before rem
 });
 
 test('closing is idempotent and racing server requests receive errors without becoming pending', async t => {
-  const dir = home(t), rpc = transport(), logs = [], broker = new RequestBroker({ home: dir, log: event => logs.push(event) });
+  const dir = home(t), rpc = transport(), logs = [], broker = new RequestBroker({ home: dir, policy: 'manual', log: event => logs.push(event) });
   await broker.start(); t.after(() => broker.close());
   broker.handle(rpc, approval);
   const closing = broker.close();

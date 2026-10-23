@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicWrite } from './state.mjs';
 import { validateResponse } from './protocol.mjs';
+import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
 function policyResponse(policy, event) {
   if (policy === 'manual') return undefined;
@@ -59,7 +60,7 @@ export async function respond(home, requestId, result, { error } = {}) {
 }
 
 export class RequestBroker {
-  constructor({ home, log = () => {}, policy = 'manual', threadId } = {}) {
+  constructor({ home, log = () => {}, policy = DEFAULT_PERMISSIONS.requestPolicy, threadId } = {}) {
     if (!['manual', 'approve', 'decline'].includes(policy)) throw new Error('Approval policy must be manual, approve or decline');
     this.home = home; this.log = log; this.policy = policy; this.threadId = threadId;
     this.requests = new Map(); this.connections = new Map(); this.clients = new Set();

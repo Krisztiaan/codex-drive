@@ -5,29 +5,34 @@ import { parseArgs } from '../src/args.mjs';
 
 const start = ['start', '--cwd', '.', '--model', 'gpt-6.1-sol', '--effort', 'low', '--log', 'events.jsonl'];
 
-test('start uses explicit inputs and safe sandbox/approval defaults', () => {
+test('start uses explicit inputs and full-access sandbox/approval defaults', () => {
   const result = parseArgs([...start, 'Do the work']);
   assert.equal(result.command, 'start');
   assert.deepEqual(result.positional, ['Do the work']);
   assert.deepEqual(result.options, {
     cwd: resolve('.'), model: 'gpt-6.1-sol', effort: 'low', log: resolve('events.jsonl'),
-    sandbox: 'workspace-write', approval: 'on-request',
+    sandbox: 'danger-full-access', approval: 'never',
   });
 });
 
 test('--cd alias and repeated --add-dir resolve paths', () => {
   const result = parseArgs(['start', '--cd', 'project', '--model', 'gpt-6.1-sol', '--effort', 'low',
-    '--log', 'events.jsonl', '--add-dir', 'first', '--add-dir', 'second', '--name', 'demo-1', 'Go']);
+    '--log', 'events.jsonl', '--sandbox', 'workspace-write', '--add-dir', 'first', '--add-dir', 'second', '--name', 'demo-1', 'Go']);
   assert.equal(result.options.cwd, resolve('project'));
   assert.deepEqual(result.options['add-dir'], [resolve('first'), resolve('second')]);
   assert.equal(result.options.name, 'demo-1');
   assert.throws(() => parseArgs([...start, '--cd', '.', 'Go']), /Choose --cwd or --cd/);
 });
 
-test('full access and approval never must be explicit', () => {
-  const result = parseArgs([...start, '--sandbox', 'danger-full-access', '--approval', 'never', 'Go']);
-  assert.equal(result.options.sandbox, 'danger-full-access');
-  assert.equal(result.options.approval, 'never');
+test('explicit stricter sandbox, approval and request policies win', () => {
+  for (const command of ['start', 'resume', 'adopt', 'attach', 'fork']) {
+    for (const policy of ['manual', 'decline']) {
+      const result = parseArgs([command, ...(command === 'start' ? [] : ['demo']), '--sandbox', 'read-only', '--approval', 'on-request', '--request-policy', policy]);
+      assert.equal(result.options.sandbox, 'read-only');
+      assert.equal(result.options.approval, 'on-request');
+      assert.equal(result.options['request-policy'], policy);
+    }
+  }
   assert.throws(() => parseArgs([...start, '--sandbox', 'danger-full-access', '--add-dir', '.', 'Go']), /--add-dir requires workspace-write/);
 });
 
@@ -59,9 +64,9 @@ test('invalid command options, duplicate flags, missing values, and counts fail 
   }
 });
 
-test('server configuration can supply model and effort; start defaults cwd and safety', () => {
+test('server configuration can supply model and effort; start defaults cwd and full access', () => {
   const result = parseArgs(['start', 'Go']);
-  assert.deepEqual(result.options, { cwd: resolve('.'), sandbox: 'workspace-write', approval: 'on-request' });
+  assert.deepEqual(result.options, { cwd: resolve('.'), sandbox: 'danger-full-access', approval: 'never' });
   assert.deepEqual(parseArgs(['resume', 'demo']).positional, ['demo']);
 });
 

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { methodSchema, validateCall } from './protocol.mjs';
+import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
 export const textInput = text => [{ type: 'text', text, text_elements: [] }];
 export function readJson(source, fallback = {}) {
@@ -28,9 +29,10 @@ export function turnParams(threadMethod, options, threadDefaults, turnDefaults, 
   for (const value of [threadRaw, turnRaw]) if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Thread and turn parameters must be JSON objects');
   const thread = { ...threadDefaults, ...threadRaw };
   const turn = { ...turnDefaults, ...turnRaw };
+  const entries = overrides(options);
   const threadKeys = methodSchema(threadMethod).properties;
   const turnKeys = methodSchema('turn/start').properties;
-  for (const [key, value] of overrides(options)) {
+  for (const [key, value] of entries) {
     if (threadOnly && (key.startsWith('turn.') || !key.startsWith('thread.') && !Object.hasOwn(threadKeys, key))) throw new Error(`Parameter ${key} does not belong to ${threadMethod}`);
     if (key.startsWith('thread.')) Object.defineProperty(thread, key.slice(7), { value, enumerable: true, configurable: true, writable: true });
     else if (key.startsWith('turn.')) Object.defineProperty(turn, key.slice(5), { value, enumerable: true, configurable: true, writable: true });
@@ -41,6 +43,7 @@ export function turnParams(threadMethod, options, threadDefaults, turnDefaults, 
       if (!found) throw new Error(`Unknown parameter: ${key}; use thread.<key> or turn.<key> for an explicit scope`);
     }
   }
-  if (thread.permissions != null && !options.sandboxExplicit && thread.sandbox === 'workspace-write') delete thread.sandbox;
+  const explicitSandbox = options.sandboxExplicit || Object.hasOwn(threadRaw, 'sandbox') || entries.some(([key]) => ['sandbox', 'thread.sandbox'].includes(key));
+  if (thread.permissions != null && !explicitSandbox && thread.sandbox === DEFAULT_PERMISSIONS.sandbox) delete thread.sandbox;
   return { thread, turn };
 }

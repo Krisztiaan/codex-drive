@@ -8,6 +8,7 @@ import { textInput, turnParams } from './params.mjs';
 import { validateCall } from './protocol.mjs';
 import { exitCode, failureDetails } from './failures.mjs';
 import { connection, journal } from './client.mjs';
+import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
 export const terminal = status => ['completed', 'failed', 'interrupted', 'idle'].includes(status);
 export function findState(store, key) {
@@ -49,16 +50,16 @@ export function effectiveState(state, result) {
   }
   if (result.activePermissionProfile !== undefined) state.activePermissionProfile = result.activePermissionProfile;
 }
-function defaults(options, state, prompt, command) {
+export function attachedDefaults(options, state, prompt, command) {
   const thread = {}, turn = { input: prompt === undefined ? [] : textInput(prompt) };
   for (const key of ['cwd', 'model']) if (options[key] !== undefined) thread[key] = turn[key] = options[key];
-  if (options.sandbox) thread.sandbox = options.sandbox;
-  if (options.approval) thread.approvalPolicy = turn.approvalPolicy = options.approval;
+  if (options.sandbox || !state) thread.sandbox = options.sandbox ?? DEFAULT_PERMISSIONS.sandbox;
+  if (options.approval || !state) thread.approvalPolicy = turn.approvalPolicy = options.approval ?? DEFAULT_PERMISSIONS.approval;
   if (options.approval || command === 'start') thread.approvalsReviewer = 'user';
   if (options.effort !== undefined || state?.effort !== undefined) turn.effort = options.effort ?? state.effort;
   const roots = options['add-dir'] ?? state?.addDirs ?? [];
   if (roots.length) {
-    if ((options.sandbox ?? state?.sandbox ?? 'workspace-write') !== 'workspace-write') throw new Error('--add-dir requires workspace-write');
+    if ((options.sandbox ?? state?.sandbox ?? DEFAULT_PERMISSIONS.sandbox) !== 'workspace-write') throw new Error('--add-dir requires workspace-write');
     turn.sandboxPolicy = { type: 'workspaceWrite', writableRoots: [options.cwd ?? state?.cwd ?? process.cwd(), ...roots], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
   }
   return { thread, turn };
@@ -68,7 +69,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   if (state && options.name && options.name !== state.name) throw new Error('This thread already has local state; --name cannot rename its alias');
   const port = portFor(options, state);
   const threadMethod = command === 'start' ? 'thread/start' : 'thread/resume';
-  const base = defaults(options, state, prompt, command);
+  const base = attachedDefaults(options, state, prompt, command);
   const prepared = turnParams(threadMethod, options, { ...(state ? { threadId: state.threadId } : command !== 'start' ? { threadId: key } : {}), ...base.thread }, { ...base.turn }, { threadOnly: ['adopt', 'attach'].includes(command) });
   if (command !== 'start' && prepared.thread.threadId !== (state?.threadId ?? key)) throw new Error('threadId must match the addressed thread; use call for raw requests');
   validateCall(threadMethod, prepared.thread);
@@ -84,7 +85,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   const logPath = options.log ?? state?.logPath ?? join(store.home, 'logs', randomUUID() + '.jsonl');
   const log = journal(logPath), buffered = [];
   const brokerLog = event => { log(event); if (event.method === 'driver/requestPending') console.error(JSON.stringify(event)); };
-  const broker = new RequestBroker({ home: store.home, log: brokerLog, policy: options['request-policy'] ?? state?.requestPolicy ?? 'manual', threadId: state?.threadId ?? (command === 'start' ? undefined : key) });
+  const broker = new RequestBroker({ home: store.home, log: brokerLog, policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId ?? (command === 'start' ? undefined : key) });
   let unlock = options.name || state ? store.lock(state?.name ?? options.name ?? key) : () => {};
   let ownedTurnId;
   let rpc, shuttingDown = false, reconnecting = false, ready = false, recoveryTask = Promise.resolve();
@@ -168,13 +169,13 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     if (!state) {
       state = { name: options.name ?? null, threadId: thread.id, turnId: null, cwd: result.cwd ?? thread.cwd ?? prepared.thread.cwd,
         model: result.model ?? prepared.thread.model, effort: prepared.turn.effort ?? result.reasoningEffort ?? null,
-        sandbox: prepared.thread.sandbox ?? 'workspace-write', approval: prepared.thread.approvalPolicy ?? result.approvalPolicy ?? 'on-request',
+        sandbox: prepared.thread.sandbox ?? DEFAULT_PERMISSIONS.sandbox, approval: prepared.thread.approvalPolicy ?? result.approvalPolicy ?? DEFAULT_PERMISSIONS.approval,
         addDirs: options['add-dir'] ?? [], logPath, port, status: 'idle', lastEventTime: null, lastAgentMessage: null };
       if (!options.name) { const canonicalUnlock = store.lock(state.threadId); unlock(); unlock = canonicalUnlock; }
       store.create(state);
     }
     broker.threadId = state.threadId;
-    state.logPath = logPath; state.requestPolicy = options['request-policy'] ?? state.requestPolicy ?? 'manual';
+    state.logPath = logPath; state.requestPolicy = options['request-policy'] ?? state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy;
     for (const k of ['cwd', 'model', 'sandbox']) if (prepared.thread[k] !== undefined) state[k] = prepared.thread[k];
     if (prepared.thread.approvalPolicy !== undefined) state.approval = prepared.thread.approvalPolicy;
     if (prepared.turn.effort !== undefined) state.effort = prepared.turn.effort;
@@ -237,7 +238,7 @@ export async function waitForTurn(store, options, key) {
     for (;;) {
       try {
         if (!rpc) {
-          rpc = await connection(state.port, controller.signal, { threadId: state.threadId });
+          rpc = await connection(state.port, controller.signal, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
           rpc.on('event', event => {
             const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
             if (!targetTurnId || !eventTurnId || eventTurnId === targetTurnId) {

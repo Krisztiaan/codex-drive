@@ -7,11 +7,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from './args.mjs';
 import { Store, applyEvent } from './state.mjs';
 import { serve, warnServerDirectory } from './server.mjs';
-import { methods, methodSchema } from './protocol.mjs';
+import { methods, methodSchema, validateCall } from './protocol.mjs';
 import { readJson, callParams, textInput, turnParams } from './params.mjs';
 import { connection } from './client.mjs';
+import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 import { pendingRequests, respond } from './requests.mjs';
-import { findState, portFor, snapshot, statusView, runAttached, waitForTurn, warning, effectiveState } from './turns.mjs';
+import { findState, portFor, snapshot, statusView, runAttached, waitForTurn, warning, effectiveState, attachedDefaults } from './turns.mjs';
 
 const detachedWorker = typeof process.send === 'function';
 const print = value => console.log(JSON.stringify(value));
@@ -89,8 +90,10 @@ Server commands accept --port; saved threads use their saved port.
 Protocol calls and turn compositions accept --param key=<json>.
 Start/resume accept --thread-params <json>|@file|- and --turn-params <json>|@file|-.
 --param thread.key=<json> / turn.key=<json> explicitly scopes composed options.
-Turn conveniences: --sandbox workspace-write|read-only|danger-full-access, --approval <mode>, --add-dir <dir>.
-Defaults: workspace-write, on-request, --request-policy manual (or approve|decline).
+Start/resume/adopt/attach/fork: --sandbox workspace-write|read-only|danger-full-access, --approval <mode>.
+Start/resume: --add-dir <dir> (requires --sandbox workspace-write).
+Defaults: --sandbox ${DEFAULT_PERMISSIONS.sandbox}, --approval ${DEFAULT_PERMISSIONS.approval}, --request-policy ${DEFAULT_PERMISSIONS.requestPolicy}.
+Use --request-policy manual|decline for stricter request handling; resume respects saved thread settings.
 --retry-capacity <n> on start/resume opts into same-thread continuation retries.
 Wait exits: completed 0, other/error 1, capacity 75, usage limit 76, interrupted 130, timeout 124.`;
 async function main() {
@@ -103,8 +106,9 @@ async function main() {
     const workerArgs = detachedArgs(process.argv.slice(2));
     const normalized = parseArgs(workerArgs).options;
     const state = command === 'start' ? null : findState(store, positional[0]);
-    const prepared = turnParams(command === 'start' ? 'thread/start' : 'thread/resume', normalized, normalized, {}, { threadOnly: ['adopt', 'attach'].includes(command) });
-    warning({ ...state, ...normalized, ...prepared.thread, approval: prepared.thread.approvalPolicy ?? normalized.approval ?? state?.approval, sandboxPolicy: prepared.turn.sandboxPolicy ?? state?.sandboxPolicy });
+    const base = attachedDefaults(normalized, state, undefined, command);
+    const prepared = turnParams(command === 'start' ? 'thread/start' : 'thread/resume', normalized, base.thread, base.turn, { threadOnly: ['adopt', 'attach'].includes(command) });
+    warning({ ...state, ...prepared.thread, approval: prepared.thread.approvalPolicy ?? state?.approval, sandboxPolicy: prepared.turn.sandboxPolicy ?? state?.sandboxPolicy });
     await detach(workerArgs); return;
   }
   if (['start', 'resume', 'adopt', 'attach'].includes(command)) {
@@ -133,7 +137,7 @@ async function main() {
     for (const state of states) {
       const port = portFor(options, state);
       if (!inspected.has(port)) { warnServerDirectory(port); inspected.add(port); }
-      const rpc = await connection(port, undefined, { threadId: state.threadId });
+      const rpc = await connection(port, undefined, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
       rpc.on('event', event => applyEvent(state, event));
       try { await snapshot(rpc, state); results.push(statusView(store, state)); } finally { await rpc.close(); }
     }
@@ -152,12 +156,14 @@ async function main() {
     params = callParams(method, options, positional.length ? { threadId: state?.threadId ?? positional[0], ...(command === 'name' ? { name: positional[1] } : {}) } : {});
   } else if (command === 'fork') {
     method = 'thread/fork';
-    const raw = readJson(options['thread-params']);
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Thread parameters must be a JSON object');
-    params = callParams(method, options, { threadId: state?.threadId ?? positional[0], ...raw });
+    const threadDefaults = { threadId: state?.threadId ?? positional[0] };
+    if (options.sandbox || !state) threadDefaults.sandbox = options.sandbox ?? DEFAULT_PERMISSIONS.sandbox;
+    if (options.approval || !state) threadDefaults.approvalPolicy = options.approval ?? DEFAULT_PERMISSIONS.approval;
+    params = turnParams(method, options, threadDefaults, {}, { threadOnly: true }).thread;
+    validateCall(method, params);
     if (options.name && findState(store, options.name)) throw new Error(`Thread name already exists: ${options.name}`);
   }
-  const rpc = await connection(port, undefined, { policy: options['request-policy'] ?? 'manual', threadId: state?.threadId, ...(method === 'initialize' ? { initializeParams: params } : {}) });
+  const rpc = await connection(port, undefined, { policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId, ...(method === 'initialize' ? { initializeParams: params } : {}) });
   try {
     if (method) {
       const result = method === 'initialize' ? rpc.initializeResult : await rpc.request(method, params);
@@ -165,8 +171,8 @@ async function main() {
         const thread = result.thread;
         const forked = { ...state, name: options.name ?? null, threadId: thread.id, turnId: null, port, logPath: options.log ?? join(store.home, 'logs', thread.id + '.jsonl'),
           cwd: result.cwd ?? thread.cwd ?? state?.cwd, model: result.model ?? state?.model, effort: result.reasoningEffort ?? state?.effort ?? null,
-          sandbox: params.sandbox ?? state?.sandbox ?? 'workspace-write', approval: params.approvalPolicy ?? state?.approval ?? 'on-request', addDirs: state?.addDirs ?? [],
-          status: 'idle', lastAgentMessage: null, lastEventTime: null, error: null, failure: null, driverPid: null, sourceThreadId: params.threadId, requestPolicy: options['request-policy'] ?? state?.requestPolicy ?? 'manual' };
+          sandbox: params.sandbox ?? state?.sandbox ?? DEFAULT_PERMISSIONS.sandbox, approval: params.approvalPolicy ?? state?.approval ?? DEFAULT_PERMISSIONS.approval, addDirs: state?.addDirs ?? [],
+          status: 'idle', lastAgentMessage: null, lastEventTime: null, error: null, failure: null, driverPid: null, sourceThreadId: params.threadId, requestPolicy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy };
         effectiveState(forked, result);
         await snapshot(rpc, forked); store.create(forked); print({ threadId: thread.id, turnId: forked.turnId });
       } else print(result);

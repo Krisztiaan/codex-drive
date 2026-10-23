@@ -71,7 +71,7 @@ test('adopted external histories and forks have independent addressable turn sta
 
 test('manual server requests surface in logs, status and pending and accept validated external responses', async t => {
   const f = await fixture(t);
-  assert.equal((await f.command(['resume', 'demo', '--detach', 'Ask approval'])).code, 0);
+  assert.equal((await f.command(['resume', 'demo', '--detach', '--request-policy', 'manual', 'Ask approval'])).code, 0);
   f.request('item/commandExecution/requestApproval', { threadId: 'thread-1', turnId: 'turn-2', itemId: 'cmd', startedAtMs: Date.now(), reason: 'Proof', command: 'echo proof', cwd: f.home });
   const { until } = await import('../test-support/app-server.mjs');
   const pending = await until(async () => { const list = JSON.parse((await f.command(['pending', 'demo'])).stdout); return list.length && list; }, 'pending approval');

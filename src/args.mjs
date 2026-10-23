@@ -1,11 +1,12 @@
 import { resolve } from 'node:path';
+import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
 const values = new Set(['port', 'cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'name', 'log', 'turn', 'n', 'timeout', 'param', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity']);
 const turnOptions = ['cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'detach', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity'];
 const allowed = {
   serve: ['port', 'stop'], start: [...turnOptions, 'name', 'log'], resume: [...turnOptions, 'name', 'log'],
-  adopt: ['name', 'log', 'detach', 'thread-params', 'request-policy'], attach: ['name', 'log', 'detach', 'thread-params', 'request-policy'],
-  fork: ['name', 'log', 'thread-params', 'request-policy'],
+  adopt: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'], attach: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'],
+  fork: ['name', 'log', 'sandbox', 'approval', 'thread-params', 'request-policy'],
   steer: ['turn'], interrupt: ['turn'], status: [], wait: ['timeout'], tail: ['n'], events: ['follow'],
   pending: [], respond: ['error'], call: ['request-policy'], methods: [],
   list: [], read: [], archive: [], unarchive: [], rollback: [], compact: [], name: [], models: [], account: [], 'rate-limits': [],
@@ -40,7 +41,7 @@ export function parseArgs(argv) {
   if (options.cwd || options.cd) options.cwd = resolve(options.cwd ?? options.cd);
   if (options.log) options.log = resolve(options.log);
   Object.defineProperty(options, 'sandboxExplicit', { value: options.sandbox !== undefined });
-  if (command === 'start') { options.cwd ??= resolve('.'); options.sandbox ??= 'workspace-write'; options.approval ??= 'on-request'; }
+  if (command === 'start') { options.cwd ??= resolve('.'); options.sandbox ??= DEFAULT_PERMISSIONS.sandbox; options.approval ??= DEFAULT_PERMISSIONS.approval; }
   if (options.sandbox && !['read-only', 'workspace-write', 'danger-full-access'].includes(options.sandbox)) throw new Error('Invalid sandbox');
   // Rich protocol variants are accepted through --param approvalPolicy=<json>.
   if (options.approval && !['untrusted', 'on-failure', 'on-request', 'never'].includes(options.approval)) throw new Error('Invalid approval policy');
