@@ -1,14 +1,14 @@
 {
-  "run": "/tmp/codex-drive-proof/account-l2qRMq",
-  "node": "v26.13.0",
-  "port": 58835,
+  "run": "/tmp/codex-drive-proof/account-8UnKDE",
+  "node": "v24.21.0",
+  "port": 60602,
   "steps": [
     {
       "args": [
         "serve"
       ],
       "code": 0,
-      "stdout": "{\"pid\":96031,\"port\":58835}\n",
+      "stdout": "{\"pid\":46988,\"port\":60602}\n",
       "stderr": ""
     },
     {
@@ -24,7 +24,7 @@
         "serve"
       ],
       "code": 0,
-      "stdout": "{\"port\":58835,\"alreadyListening\":true,\"identityCheck\":\"unavailable\"}\n",
+      "stdout": "{\"port\":60602,\"alreadyListening\":true,\"identityCheck\":\"unavailable\"}\n",
       "stderr": "WARNING: account usage unavailable; limit state is unknown.\n"
     },
     {
@@ -42,7 +42,7 @@
         "--restart"
       ],
       "code": 0,
-      "stdout": "{\"pid\":96972,\"port\":58835}\n",
+      "stdout": "{\"pid\":51775,\"port\":60602}\n",
       "stderr": ""
     },
     {
@@ -51,7 +51,7 @@
         "--stop"
       ],
       "code": 0,
-      "stdout": "{\"port\":58835,\"stopped\":[96972]}\n",
+      "stdout": "{\"port\":60602,\"stopped\":[51775]}\n",
       "stderr": ""
     }
   ],

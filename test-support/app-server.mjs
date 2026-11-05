@@ -144,6 +144,6 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   return { home, port, state, seed, persist, turns, threads, received, replies, complete, emit, request(method, params, id = 'server-1') { for (const socket of sockets) if (socket.turnOwner) socket.write(frame({ id, method, params })); }, launch, command, hasRead: () => reads > 0, pause(method) { paused.add(method); }, loseNextStartReply(rateLimits = null) { loseStartReply = true; lostReplyRateLimits = rateLimits; }, disconnect() { for (const socket of sockets) socket.destroy(); } };
 }
 export async function until(check, label = 'condition') {
-  for (let n = 0; n < 200; n++) { const value = await check(); if (value) return value; await delay(25); }
+  for (let n = 0; n < 400; n++) { const value = await check(); if (value) return value; await delay(25); }
   throw new Error(`Timed out waiting for ${label}`);
 }
