@@ -3,6 +3,8 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync, openSync, closeSync, readFileSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { connection } from './client.mjs';
+import { accountHealth, codexHome } from './account.mjs';
 import { Store, stateHome, atomicWrite } from './state.mjs';
 
 export function listening(port) {
@@ -47,14 +49,47 @@ function descendedFrom(pid, ancestor) {
   }
   return false;
 }
-export async function serve(port, stop = false) {
+export async function activeTurns(port) {
+  const rpc = await connection(port);
+  try {
+    const active = []; let cursor;
+    do {
+      const page = await rpc.request('thread/loaded/list', { ...(cursor ? { cursor } : {}) });
+      for (const id of page.data) {
+        const { thread } = await rpc.request('thread/read', { threadId: id, includeTurns: true });
+        if (thread.turns?.some(t => t.status === 'inProgress')) active.push(id);
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+    const states = new Store().all();
+    return active.map(id => states.find(s => s.threadId === id)?.name ?? id);
+  } finally { await rpc.close(); }
+}
+export async function serve(port, stop = false, options = {}) {
   const home = resolve(stateHome()); mkdirSync(home, { recursive: true, mode: 0o700 });
   const path = join(home, `server-${port}.json`);
   const unlock = new Store(join(home, 'servers')).lock(String(port));
   try {
-    if (stop) {
+    if (stop || options.restart) {
+      const initialPids = listenerPids(port);
+      let inspected = false;
+      // A timed-out TCP probe is not evidence of an idle/absent listener.
+      // Any PID we may signal must first pass active-turn inspection.
+      if (initialPids.length || await listening(port)) {
+        const deadline = Date.now() + Number(options.timeout ?? 30) * 1000;
+        for (;;) {
+          const active = await activeTurns(port);
+          if (!active.length) break;
+          const message = `Active sessions on port ${port}: ${active.join(', ')}`;
+          if (options.force) { console.error(`WARNING: forcing shutdown. ${message}; turns may be interrupted.`); break; }
+          if (!options.restart || Date.now() >= deadline) throw new Error(`${message}. Refusing shutdown; wait for idle or explicitly use --force.`);
+          console.error(`${message}; waiting for idle.`); await delay(500);
+        }
+        inspected = true;
+      }
       const recorded = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
       const pids = listenerPids(port);
+      if (pids.length && (!inspected || pids.some(pid => !initialPids.includes(pid)))) throw new Error('Listener changed during shutdown inspection; refusing to signal an unchecked listener');
       if (recorded && pids.some(pid => !descendedFrom(pid, recorded.pid))) throw new Error('Recorded pid differs from current listener; refusing to stop a replacement');
       // A stale recorded pid must never kill a recycled unrelated process.
       const targets = recorded ? pids.filter(pid => descendedFrom(pid, recorded.pid)) : pids;
@@ -62,9 +97,9 @@ export async function serve(port, stop = false) {
       for (let i = 0; i < 50 && await listening(port); i++) await delay(100);
       if (await listening(port)) throw new Error('Listener did not stop after SIGTERM');
       if (existsSync(path)) unlinkSync(path);
-      return { port, stopped: targets };
+      if (!options.restart) return { port, stopped: targets };
     }
-    if (await listening(port)) { warnServerDirectory(port); return { port, alreadyListening: true }; }
+    if (await listening(port)) { warnServerDirectory(port); const rpc = await connection(port); try { const health = await accountHealth(rpc); return { port, alreadyListening: true, identityCheck: health.identityCheck }; } finally { await rpc.close(); } }
     const fd = openSync(join(home, `server-${port}.log`), 'a', 0o600);
     const child = spawn('codex', ['app-server', '--listen', `ws://127.0.0.1:${port}`], { cwd: home, detached: true, stdio: ['ignore', fd, fd] });
     closeSync(fd);
@@ -77,7 +112,7 @@ export async function serve(port, stop = false) {
           if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, 'SIGTERM');
           warnServerDirectory(port); return { port, alreadyListening: true };
         }
-        atomicWrite(path, { pid: owned[0], launcherPid: child.pid, port, cwd: home }); return { pid: owned[0], port };
+        atomicWrite(path, { pid: owned[0], launcherPid: child.pid, port, cwd: home, codexHome: codexHome() }); return { pid: owned[0], port };
       }
       if (child.exitCode !== null || child.signalCode !== null) break;
       await delay(100);

@@ -17,7 +17,7 @@ export function atomicWrite(path, value) {
 export class Store {
   constructor(home = stateHome()) { this.home = home; this.dir = join(home, 'threads'); mkdirSync(this.dir, { recursive: true, mode: 0o700 }); }
   path(key) { return join(this.dir, checkKey(key) + '.json'); }
-  all() { return readdirSync(this.dir).filter(f => f.endsWith('.json')).map(f => JSON.parse(readFileSync(join(this.dir, f), 'utf8'))); }
+  all() { return readdirSync(this.dir).filter(f => f.endsWith('.json')).flatMap(f => { try { return [JSON.parse(readFileSync(join(this.dir, f), 'utf8'))]; } catch (error) { if (error.code === 'ENOENT') return []; throw error; } }); }
   read(key) {
     const path = this.path(key);
     const state = this.all().find(s => s.threadId === key) ?? (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null);

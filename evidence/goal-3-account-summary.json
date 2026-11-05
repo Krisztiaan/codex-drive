@@ -1,0 +1,59 @@
+{
+  "run": "/tmp/codex-drive-proof/account-l2qRMq",
+  "node": "v26.13.0",
+  "port": 58835,
+  "steps": [
+    {
+      "args": [
+        "serve"
+      ],
+      "code": 0,
+      "stdout": "{\"pid\":96031,\"port\":58835}\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "account"
+      ],
+      "code": 0,
+      "stdout": "Account: unavailable | plan: unknown\nOrdinary usage allowed: unknown\n",
+      "stderr": "WARNING: account usage unavailable; limit state is unknown.\n"
+    },
+    {
+      "args": [
+        "serve"
+      ],
+      "code": 0,
+      "stdout": "{\"port\":58835,\"alreadyListening\":true,\"identityCheck\":\"unavailable\"}\n",
+      "stderr": "WARNING: account usage unavailable; limit state is unknown.\n"
+    },
+    {
+      "args": [
+        "status",
+        "--json"
+      ],
+      "code": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "serve",
+        "--restart"
+      ],
+      "code": 0,
+      "stdout": "{\"pid\":96972,\"port\":58835}\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "serve",
+        "--stop"
+      ],
+      "code": 0,
+      "stdout": "{\"port\":58835,\"stopped\":[96972]}\n",
+      "stderr": ""
+    }
+  ],
+  "passed": true
+}

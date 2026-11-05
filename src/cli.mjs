@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { setMaxListeners } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -10,6 +11,8 @@ import { serve, warnServerDirectory } from './server.mjs';
 import { methods, methodSchema, validateCall } from './protocol.mjs';
 import { readJson, callParams, textInput, turnParams } from './params.mjs';
 import { connection } from './client.mjs';
+import { accountHealth, usageText } from './account.mjs';
+import { filterStates, table, recordSteer, pruneCandidates, removeSession } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 import { pendingRequests, respond } from './requests.mjs';
 import { findState, portFor, snapshot, statusView, runAttached, waitForTurn, warning, effectiveState, attachedDefaults } from './turns.mjs';
@@ -69,15 +72,16 @@ async function detach(args) {
   child.unref(); print(ids);
 }
 const usage = `Usage: codex-drive <command>
-  serve [--port 4700] [--stop]
+  serve [--port 4700] [--stop | --restart] [--force] [--timeout seconds]
   methods
   call <method> [<params-json>|@file|-] [--param key=<json>]
   start ["<prompt>"] [--cwd <dir>] [--model <m>] [--effort <e>] [--log <file>] [--name <n>] [--detach]
   resume <name|threadId> ["<prompt>"] [--detach]
   adopt|attach <threadId> [--name <n>] [--log <file>] [--detach]
   fork <name|threadId> [--name <new-name>] [--log <file>]
-  wait <name|threadId> [--timeout <seconds>]
-  status [<name|threadId>]
+  wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
+  status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob]
+  prune [--older-than 30d] [--apply]
   events <name|threadId> [--follow]
   tail <name|threadId> [-n 20]
   pending [<name|threadId>]
@@ -85,7 +89,7 @@ const usage = `Usage: codex-drive <command>
   steer <name|threadId> [--turn <turnId>] "<text>"
   interrupt <name|threadId> [--turn <turnId>]
   list | read <id> | archive <id> | unarchive <id> | rollback <id> | compact <id> | name <id> <name>
-  models | account | rate-limits
+  models | account [--json] | rate-limits [--json]
 Server commands accept --port; saved threads use their saved port.
 Protocol calls and turn compositions accept --param key=<json>.
 Start/resume accept --thread-params <json>|@file|- and --turn-params <json>|@file|-.
@@ -95,12 +99,15 @@ Start/resume: --add-dir <dir> (requires --sandbox workspace-write).
 Defaults: --sandbox ${DEFAULT_PERMISSIONS.sandbox}, --approval ${DEFAULT_PERMISSIONS.approval}, --request-policy ${DEFAULT_PERMISSIONS.requestPolicy}.
 Use --request-policy manual|decline for stricter request handling; resume respects saved thread settings.
 --retry-capacity <n> on start/resume opts into same-thread continuation retries.
+Multi-wait defaults to --all; --any closes observers without interrupting turns.
+Combined exit: 76 if any usage limit, otherwise largest observed exit code.
+Prune defaults to dry-run; --apply removes confirmed old terminal local sessions.
 Wait exits: completed 0, other/error 1, capacity 75, usage limit 76, interrupted 130, timeout 124.`;
 async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
   if (command === 'methods') { print(methods()); return; }
-  if (command === 'serve') { print(await serve(Number(options.port ?? 4700), options.stop)); return; }
+  if (command === 'serve') { print(await serve(Number(options.port ?? 4700), options.stop, options)); return; }
   const store = new Store();
   if (options.detach) {
     const workerArgs = detachedArgs(process.argv.slice(2));
@@ -109,6 +116,7 @@ async function main() {
     const base = attachedDefaults(normalized, state, undefined, command);
     const prepared = turnParams(command === 'start' ? 'thread/start' : 'thread/resume', normalized, base.thread, base.turn, { threadOnly: ['adopt', 'attach'].includes(command) });
     warning({ ...state, ...prepared.thread, approval: prepared.thread.approvalPolicy ?? state?.approval, sandboxPolicy: prepared.turn.sandboxPolicy ?? state?.sandboxPolicy });
+    if (['start', 'resume'].includes(command)) { const rpc = await connection(portFor(normalized, state)); try { await accountHealth(rpc, { warnUsage: true }); } finally { await rpc.close(); } }
     await detach(workerArgs); return;
   }
   if (['start', 'resume', 'adopt', 'attach'].includes(command)) {
@@ -123,7 +131,45 @@ async function main() {
   }
   if (command === 'pending') { print(pendingRequests(store.home, positional[0] ? findState(store, positional[0])?.threadId ?? positional[0] : undefined)); return; }
   if (command === 'respond') { const payload = readJson(positional[1]); print(await respond(store.home, positional[0], options.error ? undefined : payload, { error: options.error ? payload : undefined })); return; }
-  if (command === 'wait') { await waitForTurn(store, options, positional[0]); return; }
+  if (command === 'wait') {
+    if (positional.length === 1) { process.exitCode = await waitForTurn(store, options, positional[0]); return; }
+    // Validate every identity before opening concurrent observers.
+    for (const key of positional) portFor(options, store.read(key));
+    const cancel = new AbortController(), codes = [];
+    setMaxListeners(0, cancel.signal);
+    let winner = false;
+    const tasks = [...new Set(positional)].map(async key => {
+      let reported = false;
+      const report = value => {
+        if (options.any && winner) return;
+        reported = true; print(value);
+        if (options.any) { winner = true; cancel.abort(new Error('Another goal settled')); }
+      };
+      try {
+        const code = await waitForTurn(store, options, key, report, cancel.signal);
+        if (code != null && reported) codes.push(code);
+      } catch (error) { if (!cancel.signal.aborted) { report({ name: key, error: error.message }); codes.push(1); } }
+    });
+    await Promise.all(tasks);
+    process.exitCode = codes.includes(76) ? 76 : Math.max(0, ...codes); return;
+  }
+  if (command === 'prune') {
+    const removed = [];
+    for (const state of pruneCandidates(store, options['older-than'])) {
+      if (options.apply) {
+        const unlock = store.lock(state.name ?? state.threadId);
+        try {
+          const saved = store.read(state.threadId);
+          if (saved.turnId !== state.turnId || saved.lastEventTime !== state.lastEventTime || !['completed', 'failed', 'interrupted', 'idle'].includes(saved.status)) continue;
+          const rpc = await connection(portFor(options, saved));
+          try { await snapshot(rpc, saved); if (saved.status === 'running' || saved.turnId !== state.turnId) continue; removeSession(store, saved); }
+          finally { await rpc.close(); }
+        } finally { unlock(); }
+      }
+      removed.push({ name: state.name, threadId: state.threadId, logPath: state.logPath });
+    }
+    print({ dryRun: !options.apply, sessions: removed }); return;
+  }
   if (command === 'tail' || command === 'events') {
     const state = store.read(positional[0]);
     if (command === 'events') { await events(state, options.follow); return; }
@@ -132,16 +178,28 @@ async function main() {
     console.log(lines.slice(-Number(options.n ?? 20)).join('\n')); return;
   }
   if (command === 'status') {
-    const states = positional.length ? [store.read(positional[0])] : store.all(), results = [], inspected = new Set();
+    const states = positional.length ? [store.read(positional[0])] : filterStates(store.all(), { ...options, active: false }), results = [], inspected = new Set(), usageByPort = new Map();
     if (!states.length) warnServerDirectory(Number(options.port ?? 4700));
     for (const state of states) {
       const port = portFor(options, state);
       if (!inspected.has(port)) { warnServerDirectory(port); inspected.add(port); }
-      const rpc = await connection(port, undefined, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
-      rpc.on('event', event => applyEvent(state, event));
-      try { await snapshot(rpc, state); results.push(statusView(store, state)); } finally { await rpc.close(); }
+      let rpc;
+      try {
+        rpc = await connection(port, undefined, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
+        rpc.on('event', event => applyEvent(state, event));
+        await snapshot(rpc, state);
+        if (!usageByPort.has(port)) { try { usageByPort.set(port, await rpc.request('account/rateLimits/read', {})); } catch { usageByPort.set(port, null); } }
+        const usage = usageByPort.get(port);
+        if (usage?.rateLimits) state.rateLimits = usage.rateLimits;
+        if (usage?.rateLimitsByLimitId) state.rateLimitsByLimitId = usage.rateLimitsByLimitId;
+        results.push(statusView(store, state));
+      } catch (error) {
+        if (positional.length) throw error;
+        results.push({ ...statusView(store, state), refreshError: error.message });
+      } finally { await rpc?.close(); }
     }
-    print(positional.length ? results[0] : results); return;
+    if (positional.length) print(results[0]);
+    else { const filtered = filterStates(results, options); if (options.json) print(filtered); else console.log(table(filtered)); } return;
   }
   const state = command !== 'call' && positional[0] ? findState(store, positional[0]) : null;
   if (['steer', 'interrupt'].includes(command) && !state) throw new Error('Unknown thread; adopt it first');
@@ -175,6 +233,9 @@ async function main() {
           status: 'idle', lastAgentMessage: null, lastEventTime: null, error: null, failure: null, driverPid: null, sourceThreadId: params.threadId, requestPolicy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy };
         effectiveState(forked, result);
         await snapshot(rpc, forked); store.create(forked); print({ threadId: thread.id, turnId: forked.turnId });
+      } else if (['account', 'rate-limits'].includes(command) && !options.json) {
+        const health = await accountHealth(rpc);
+        console.log(usageText(command === 'account' ? result : health.account, command === 'rate-limits' ? result : health.usage));
       } else print(result);
       return;
     }
@@ -182,7 +243,13 @@ async function main() {
     await rpc.request('thread/resume', { threadId: state.threadId }); await snapshot(rpc, state);
     if (state.status !== 'running') throw new Error(`No turn is running (${state.status})`);
     const turnId = options.turn ?? state.turnId;
-    if (command === 'steer') print(await rpc.request('turn/steer', callParams('turn/steer', options, { threadId: state.threadId, expectedTurnId: turnId, input: textInput(positional[1]) })));
+    if (command === 'steer') {
+      const params = callParams('turn/steer', options, { threadId: state.threadId, expectedTurnId: turnId, input: textInput(positional[1]) });
+      const result = await rpc.request('turn/steer', params);
+      try { recordSteer(store, state, params.input.filter(item => item.type === 'text').map(item => item.text).join('\n'), params.expectedTurnId); }
+      catch (error) { throw new Error(`Steer accepted, but bookkeeping failed: ${error.message}. Do not resend the steer.`); }
+      print(result);
+    }
     else print(await rpc.request('turn/interrupt', callParams('turn/interrupt', options, { threadId: state.threadId, turnId })));
   } finally { await rpc.close(); }
 }

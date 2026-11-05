@@ -2,12 +2,14 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Rpc } from './rpc.mjs';
-import { applyEvent } from './state.mjs';
+import { Store, applyEvent } from './state.mjs';
 import { RequestBroker, pendingRequests } from './requests.mjs';
 import { textInput, turnParams } from './params.mjs';
 import { validateCall } from './protocol.mjs';
 import { exitCode, failureDetails } from './failures.mjs';
 import { connection, journal } from './client.mjs';
+import { accountHealth } from './account.mjs';
+import { steersFor } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
 export const terminal = status => ['completed', 'failed', 'interrupted', 'idle'].includes(status);
@@ -20,7 +22,7 @@ export function portFor(options, state) {
   return state?.port ?? Number(options.port ?? 4700);
 }
 export function statusView(store, state) {
-  return { ...state, failure: state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null, pendingRequests: pendingRequests(store.home, state.threadId) };
+  return { ...state, steers: steersFor(store, state), failure: state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null, pendingRequests: pendingRequests(store.home, state.threadId) };
 }
 export async function snapshot(rpc, state, signal, targetTurnId) {
   let cursor, turn;
@@ -87,6 +89,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   const brokerLog = event => { log(event); if (event.method === 'driver/requestPending') console.error(JSON.stringify(event)); };
   const broker = new RequestBroker({ home: store.home, log: brokerLog, policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId ?? (command === 'start' ? undefined : key) });
   let unlock = options.name || state ? store.lock(state?.name ?? options.name ?? key) : () => {};
+  let releaseServer;
   let ownedTurnId;
   let rpc, shuttingDown = false, reconnecting = false, ready = false, recoveryTask = Promise.resolve();
   let resolveDone, rejectDone;
@@ -161,8 +164,10 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   }
   try {
     if (command === 'start' && options.name && findState(store, options.name)) throw new Error(`Thread name already exists: ${options.name}`);
+    releaseServer = new Store(join(store.home, 'servers')).lock(String(port));
     await broker.start(); warning({ ...state, ...prepared.thread, approval: prepared.thread.approvalPolicy ?? state?.approval, sandboxPolicy: prepared.turn.sandboxPolicy });
     rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
+    if (['start', 'resume'].includes(command)) await accountHealth(rpc, { warnUsage: true });
     const result = await rpc.request(threadMethod, prepared.thread, { signal: controller.signal });
     const thread = result.thread;
     if (state && thread.id !== state.threadId) throw new Error('Resume returned a different thread; use adopt or call');
@@ -187,6 +192,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       await startTurn({ ...prepared.turn, threadId: state.threadId });
     }
     ready = true; for (const event of buffered.splice(0)) reduce(event); store.save(state);
+    releaseServer(); releaseServer = null;
     if (readyCallback) {
       state.driverPid = process.pid; store.save(state); log({ method: 'driver/attached', params: { threadId: state.threadId, turnId: state.turnId, pid: process.pid } });
     }
@@ -208,19 +214,23 @@ export async function runAttached(store, command, options, key, prompt, readyCal
         log({ method: 'driver/capacityRetrySkipped', params: { threadId: state.threadId, failedTurnId, currentTurnId: latest.turnId, reason: 'Thread advanced during backoff' } });
         break;
       }
+      releaseServer = new Store(join(store.home, 'servers')).lock(String(port));
+      await accountHealth(rpc, { warnUsage: true });
       ready = false; done = newDone();
       await startTurn({ ...prepared.turn, threadId: state.threadId, input: textInput('Continue from where you stopped.') });
       ready = true; for (const event of buffered.splice(0)) reduce(event); store.save(state);
+      releaseServer(); releaseServer = null;
     }
     store.save(state); process.exitCode = ['adopt', 'attach'].includes(command) && terminal(state.status) ? 0 : exitCode(state);
     if (state.status === 'failed') console.error(JSON.stringify(state.error));
   } finally {
+    releaseServer?.();
     shuttingDown = true;
     await broker.close(); rpc?.close(); await recoveryTask; rpc?.close();
     process.off('SIGINT', onInt); process.off('SIGTERM', onTerm); unlock();
   }
 }
-export async function waitForTurn(store, options, key) {
+export async function waitForTurn(store, options, key, report = value => console.log(JSON.stringify(value)), externalSignal) {
   const state = store.read(key); portFor(options, state);
   const completions = new Map();
   const rememberFailure = known => {
@@ -231,6 +241,9 @@ export async function waitForTurn(store, options, key) {
   };
   rememberFailure(state);
   const controller = new AbortController();
+  const cancel = () => controller.abort(externalSignal.reason);
+  externalSignal?.addEventListener('abort', cancel, { once: true });
+  if (externalSignal?.aborted) cancel();
   const timer = options.timeout ? setTimeout(() => controller.abort(new Error('Wait timed out')), Number(options.timeout) * 1000) : null;
   let rpc;
   try {
@@ -268,9 +281,10 @@ export async function waitForTurn(store, options, key) {
         await delay(100, undefined, { signal: controller.signal });
       }
     }
-    console.log(JSON.stringify(statusView(store, state))); process.exitCode = exitCode(state);
+    const result = statusView(store, state); report(result); return exitCode(state);
   } catch (error) {
     if (!controller.signal.aborted) throw error;
-    console.log(JSON.stringify({ ...statusView(store, state), timedOut: true })); process.exitCode = 124;
-  } finally { clearTimeout(timer); await rpc?.close(); }
+    if (externalSignal?.aborted) return null;
+    report({ ...statusView(store, state), timedOut: true }); return 124;
+  } finally { clearTimeout(timer); externalSignal?.removeEventListener('abort', cancel); await rpc?.close(); }
 }
