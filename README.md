@@ -1,6 +1,6 @@
 # codex-drive
 
-A Node 26 command-line client for the installed Codex app-server. An orchestrator or person can make any generated protocol request, own a turn's event stream, answer server requests, adopt sessions and fork them. Named commands compose the same validated RPC core; they do not implement a separate Codex runtime.
+A Node 24+ command-line client for the installed Codex app-server. An orchestrator or person can make any generated protocol request, own a turn's event stream, answer server requests, adopt sessions and fork them. Named commands compose the same validated RPC core; they do not implement a separate Codex runtime.
 
 Requires `codex` on PATH, authenticated access for model turns, and `lsof`/`ps` for server ownership (tested on macOS). Runtime validation uses Ajv and the checked-in generated JSON Schema.
 
@@ -15,7 +15,7 @@ npm run protocol
 
 The installer symlinks `~/.local/bin/codex-drive` to this checkout's executable `src/cli.mjs`. It is repeatable and refuses to replace files, directories or foreign symlinks, including broken links. Ensure `~/.local/bin` is on PATH. No build step is required. Moving the checkout requires updating the link manually. Direct invocation and `npm link` also work.
 
-`npm run protocol` runs `codex app-server generate-json-schema --experimental` and replaces [protocol/schema.json](protocol/schema.json) with the complete canonical bundle. It contains client requests, notifications, server requests, response types and error types. The current installed version produces **167 client methods and 11 server request methods**; [protocol/README.md](protocol/README.md) records its version. Regenerate after upgrading Codex. New client methods and parameters become available without changing runtime code. The generation step checks that every server request has a generated response schema. The former partial TypeScript reference tree has been removed.
+`npm run protocol` runs `codex app-server generate-json-schema --experimental` and replaces [protocol/schema.json](protocol/schema.json) with the complete canonical bundle. It contains client requests, notifications, server requests, response types and error types. The current installed version produces **179 client methods and 11 server request methods**; [protocol/README.md](protocol/README.md) records its version. Regenerate after upgrading Codex. New client methods and parameters become available without changing runtime code. The generation step checks that every server request has a generated response schema. The former partial TypeScript reference tree has been removed.
 
 ## Pass-through commands
 
@@ -31,7 +31,7 @@ printf '%s\n' '{"threadId":"UUID"}' | codex-drive call thread/read - --port 4800
 
 Connections enable the experimental API because it is included in the generated schema. Notifications are not filtered by a maintained list of known methods. Every connection journals raw server envelopes under the thread's log or `CODEX_DRIVE_HOME/calls/`. Generic calls are short-lived: if a method starts asynchronous work, use `adopt --detach` to keep an owner for its subsequent events and server requests. A server request received during the call is surfaced while the call is pending; normal connection closure explicitly rejects any outstanding request.
 
-Small aliases forward **every** parameter of their mapped request via `--param`, returning its raw result:
+Small aliases forward **every** parameter of their mapped request via `--param`. Most return the raw result; account commands have readable summaries and a `--json` escape hatch:
 
 | Command | Protocol method |
 | --- | --- |
@@ -107,6 +107,10 @@ The default `--request-policy approve` automatically answers command/file/permis
 
 ## Status, waiting and failures
 
+`status` without a name prints a compact table (name, status, model, cwd tail, event age, last message and quota remaining). Use `--json` for the previous JSON array. Filters combine: `--active`, `--cwd /project` (path prefix with directory boundaries), `--since 24h`, and `--name 'goal-*'` (shell-quoted glob with `*`/`?`). Durations accept positive s/m/h/d/w values. Unreachable servers produce an unavailable row with `refreshError` in JSON, allowing other sessions to remain visible. Active filtering uses refreshed status. Usage percentages are observed quota headroom, not permission to dispatch.
+
+`status <name|threadId>` keeps its JSON object output and adds `steers`, with accepted steering text, turn ID and timestamp. Steering is stored in a separate per-thread journal under `CODEX_DRIVE_HOME/steers/` to avoid racing the attached state writer.
+
 `status` refreshes from the app-server, reporting current turn status, the current turn's last completed agent-message line (or null), received event time, pending requests, structured error/failure details and observed rate limits. Resume clears the previous turn's message. Rate-limit notifications are recorded in thread state, including a per-quota map; server-supplied reset timestamps are reported as Unix seconds. Sparse unavailable account metadata does not erase previously known metadata for the same quota.
 
 `wait <name|threadId> [--timeout seconds]` reconnects and observes the current turn even without a logger. It pins the turn from its first snapshot, returns immediately for an ended turn, prints one final status JSON and exits:
@@ -119,6 +123,8 @@ The default `--request-policy approve` automatically answers command/file/permis
 | 76 | Usage limit: `usageLimitExceeded`, `rateLimitExceeded` or `sessionBudgetExceeded` |
 | 130 | Interrupted |
 | 124 | Timeout; returned JSON includes `timedOut: true` |
+
+`wait a b c` observes goals concurrently and prints one final status JSON line per completion. `--all` is the default; `--any` returns after the first result and closes the remaining observers, leaving turns running. Errors produce a JSON line naming the affected goal. The combined exit is 76 if any observed result hit a usage limit, otherwise the largest exit code (including 124 timeout and 130 interruption). `--timeout` bounds each observer from invocation; single-name output and exit codes stay unchanged.
 
 For the same turn, wait preserves the status and error from an observed `turn/completed` notification across later snapshots and reconnects. It also uses an attached logger's saved failure, rechecking saved state before accepting a terminal snapshot. This prevents a snapshot reporting interrupted without an error from erasing a recorded capacity or usage failure. A saved failure from an older turn cannot settle a wait for a newer one; saved interrupted snapshots do not override failed server results.
 
@@ -146,11 +152,19 @@ Own the event follower's PID if you start it. Approval responses and steering ma
 
 ## Server ownership and persistence
 
-The WebSocket endpoint is always `ws://127.0.0.1:<port>`; start/serve default to 4700. `serve` starts a standalone app-server and returns its actual listener PID, or reuses an existing listener. `serve --stop --port PORT` targets only that port's verified recorded listener/child and refuses replacement listeners. Startup is serialized within the driver home. Processes are never selected by name. The driver does not alter the shared Codex daemon or configuration. Set `CODEX_HOME` before serve to select the server's histories and authentication.
+The WebSocket endpoint is always `ws://127.0.0.1:<port>`; start/serve default to 4700. `serve` starts a standalone app-server and returns its actual listener PID, or reuses an existing listener. `serve --stop --port PORT` refuses while any server-loaded thread has a turn in progress, listing local names or thread IDs (including threads without local state). Inspection failures also refuse shutdown. `serve --restart --port PORT` waits up to 30 seconds for idle, then stops and starts on the same port; `--timeout seconds` changes the idle-wait budget. `--force` on stop/restart explicitly permits interruption and lists affected sessions on stderr. Start/resume dispatch and restart share a driver-home/port lock; independent raw clients and other driver homes must coordinate their mutations. `serve --stop --port PORT` targets only that port's verified recorded listener/child and refuses replacement listeners. Startup is serialized within the driver home. Processes are never selected by name. The driver does not alter the shared Codex daemon or configuration. Set `CODEX_HOME` before serve to select the server's histories and authentication.
+
+`serve` checks an existing server’s account against auth identity metadata on disk before reporting health. Start/resume also check before dispatch and warn for mismatches and usage at 90% or more, or when the backend disallows ordinary usage. Warnings do not block dispatch. Detached invocations display these warnings to their caller too. `account` and `rate-limits` print the account, plan, used percentages, reset times in local time and backend ordinary-usage permission (unknown when unavailable). Use `--json` for their original raw results, or `call account/read` / `call account/rateLimits/read`. Percentages and reset times never establish permission to retry.
+
+The checked-in schema exposes `account/read` (without an account ID), usage `accountId` when available, and `account/updated` with auth mode and plan only. It offers login/logout, but no reload-current-auth operation. The driver never logs in, logs out or refreshes tokens for detection. It compares account IDs from usage and auth metadata, falling back to email; unavailable identities are reported as `identityCheck: "unavailable"` by serve. New server metadata records its `CODEX_HOME`; legacy listeners use the caller’s `CODEX_HOME`, so run health checks with the same environment used to launch them. Identity comparisons cannot distinguish accounts when both ID and email are unavailable. Recover with an explicit idle restart, or start a second server on another port with the current auth.
 
 New servers run from the absolute driver state home, so deleting the caller's worktree does not break later configuration loading, resume or adoption. Keep that state home available for the server's lifetime. `serve` and `status` inspect existing listeners too, including older servers without saved cwd metadata. If a listener's working directory has disappeared, they warn on stderr with its port, PID and path; JSON output remains unchanged. They leave the server running. Restart it from a stable directory when its sessions can be safely resumed.
 
 State defaults to `~/.codex-drive`, with private atomic thread files and one attached writer per thread. `CODEX_DRIVE_HOME` relocates it. Logs and pending envelopes contain prompts, agent/command output and request content; keep their location private. A logger rejoins through `thread/resume` after disconnect, refreshes history and marks the gap. Lost `turn/start` replies are recovered by inspecting the known thread rather than resubmitting input. Unknown outcomes fail clearly. Reconnects cannot guarantee lossless event replay; inspect status if a driver fails, since the server turn may continue.
+
+`prune [--older-than 30d]` lists old terminal local sessions as JSON and defaults to dry-run. `--apply` takes each session’s writer lock, confirms its current turn is terminal through the saved server, and removes its local state and steer journal. A session that advanced to a different turn after selection is retained. It removes logs only under the driver home’s `logs/` directory when unshared; explicitly supplied external logs are retained. Active writers, running turns and sessions with unknown event age are excluded. Unreachable servers fail clearly without removing that session. Server histories are never archived or deleted. Calls/server diagnostics logs are retained; inspect and remove those separately when no owners need them.
+
+Local names remain unique within a driver home; collisions fail before starting a turn. Use project-prefixed names (`project-task`) or separate `CODEX_DRIVE_HOME` values for projects; `--cwd` helps select a project’s sessions.
 
 ## Verification and limits
 
@@ -161,8 +175,9 @@ npm run proof
 node scripts/orchestrator-proof.mjs
 node scripts/full-client-proof.mjs
 node scripts/server-cwd-proof.mjs
+node scripts/account-proof.mjs  # no credentials or model turns
 ```
 
-Tests exercise the public CLI against an isolated fake app-server, generated-schema validation, pending-response routing and state persistence. Failure fixtures are checked against the generated notification schemas. Native proofs are billable, use `gpt-6.1-sol` at low effort, choose other free ports and isolated homes under `/tmp/codex-drive-proof/`, and stop only resources they started. Temporary authentication copies are removed. The original proofs cover steer, interrupt, resume, detach, timeout and recovery; the full-client proof adds exec adoption, independent forks, an actual approval answered externally, unwrapped calls and event follow. The server-cwd proof deletes the launching directory, checks native resume/adoption and verifies warnings for a legacy listener with a deleted cwd. [PROOF.md](PROOF.md) records inspected results.
+`npm test` limits file concurrency to two so subprocess startup does not compete across the entire suite; individual orchestration tests still run concurrent clients. Tests exercise the public CLI against an isolated fake app-server, generated-schema validation, pending-response routing and state persistence. Failure fixtures are checked against the generated notification schemas. The account proof runs an isolated unauthenticated server, checks summaries/health/restart/stop, and uses no model turns. The other native proofs are billable, use `gpt-6.1-sol` at low effort, choose other free ports and isolated homes under `/tmp/codex-drive-proof/`, and stop only resources they started. Temporary authentication copies are removed. The original proofs cover steer, interrupt, resume, detach, timeout and recovery; the full-client proof adds exec adoption, independent forks, an actual approval answered externally, unwrapped calls and event follow. The server-cwd proof deletes the launching directory, checks native resume/adoption and verifies warnings for a legacy listener with a deleted cwd. [PROOF.md](PROOF.md) records inspected results.
 
-Dedicated UX for every protocol method, an interactive terminal prompt UI, realtime audio rendering and external exec/TUI process takeover are deliberately omitted: JSON call/respond and app-server history adoption provide the control surface. There is no live capacity/usage-limit hit requirement; conformant fake failures prove those branches. Aggregate status fails if a saved server is unavailable. Tail/events currently scan the log; large-log optimization awaits measurement. Hard-kill cleanup and lossless replay across disconnects are not guaranteed.
+Dedicated UX for every protocol method, an interactive terminal prompt UI, realtime audio rendering and external exec/TUI process takeover are deliberately omitted: JSON call/respond and app-server history adoption provide the control surface. There is no live capacity/usage-limit hit requirement; conformant fake failures prove those branches. Tail/events currently scan the log; large-log optimization awaits measurement. Hard-kill cleanup and lossless replay across disconnects are not guaranteed.

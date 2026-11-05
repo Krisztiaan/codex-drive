@@ -7,10 +7,10 @@
     "codex-drive": "./src/cli.mjs"
   },
   "engines": {
-    "node": ">=26"
+    "node": ">=24"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test --test-concurrency=2",
     "proof": "node scripts/proof.mjs",
     "protocol": "node scripts/generate-protocol.mjs"
   },

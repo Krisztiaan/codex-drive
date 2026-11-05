@@ -19,8 +19,8 @@ async function setup(t) {
 import { fixture } from ${JSON.stringify(peer)};
 const cleanups = [];
 const port = Number(new URL(process.argv[process.argv.indexOf('--listen') + 1]).port);
-await fixture({ after(fn) { cleanups.push(fn); } }, { port, diagnostics: () => ({ cwd: process.cwd() }) });
-process.once('SIGTERM', async () => { for (const cleanup of cleanups) await cleanup(); });
+const f = await fixture({ after(fn) { cleanups.push(fn); } }, { historyFile: process.cwd() + '/history.json', port, diagnostics: () => ({ cwd: process.cwd() }) });
+process.once('SIGTERM', async () => { for (const history of f.threads.values()) for (const turn of history) if (turn.status === 'inProgress') turn.status = 'interrupted'; f.persist(); for (const cleanup of cleanups) await cleanup(); });
 `, { mode: 0o700 });
   const env = { ...process.env, CODEX_DRIVE_HOME: home, PATH: bin + ':' + process.env.PATH };
   const probe = createServer(); await new Promise(r => probe.listen(0, '127.0.0.1', r));
@@ -73,11 +73,49 @@ test('serve and status warn about a legacy listener whose cwd was deleted withou
   assert.equal(JSON.parse(status.stdout).status, 'completed');
   assert.match(status.stderr, /WARNING:.*working directory.*no longer exists/);
   assert.match(status.stderr, /configuration.*resume.*adopt/i);
-  const empty = await f.command(['status', '--port', String(f.port)], f.run, join(f.run, 'empty-state'));
+  const empty = await f.command(['status', '--json', '--port', String(f.port)], f.run, join(f.run, 'empty-state'));
   assert.equal(empty.code, 0, empty.stderr); assert.deepEqual(JSON.parse(empty.stdout), []);
   assert.match(empty.stderr, /working directory.*no longer exists/);
   mkdirSync(f.caller); // Recreating the pathname does not restore the process's old cwd.
   const recreated = await f.command(['status', 'legacy']);
   assert.equal(recreated.code, 0, recreated.stderr);
   assert.match(recreated.stderr, /working directory.*no longer exists/);
+});
+
+test('owned server restarts idle, refuses active stop, and force lists affected sessions', async t => {
+  const f = await setup(t);
+  const started = await f.command(['serve', '--port', String(f.port)]); assert.equal(started.code, 0, started.stderr);
+  const oldPid = JSON.parse(started.stdout).pid;
+  const restarted = await f.command(['serve', '--restart', '--port', String(f.port)]);
+  assert.equal(restarted.code, 0, restarted.stderr); assert.notEqual(JSON.parse(restarted.stdout).pid, oldPid);
+  const run = await f.command(['start', '--name', 'active', '--detach', '--port', String(f.port), 'Work']);
+  assert.equal(run.code, 0, run.stderr);
+  const stopped = await f.command(['serve', '--stop', '--port', String(f.port)]);
+  assert.equal(stopped.code, 1); assert.match(stopped.stderr, /active.*Refusing shutdown/);
+  const forced = await f.command(['serve', '--stop', '--force', '--port', String(f.port)]);
+  assert.equal(forced.code, 0, forced.stderr); assert.match(forced.stderr, /forcing shutdown.*active/);
+  // Detached logger is ours; it reconnects until stopped explicitly by its recorded PID.
+  const { readFileSync } = await import('node:fs');
+  const saved = JSON.parse(readFileSync(join(f.home, 'threads/active.json'), 'utf8'));
+  try { process.kill(saved.driverPid, 'SIGTERM'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+});
+
+test('wait reconnects through an owned server restart and resume keeps the saved thread ID', async t => {
+  const f = await setup(t);
+  assert.equal((await f.command(['serve', '--port', String(f.port)])).code, 0);
+  const started = await f.command(['start', '--name', 'recover', '--detach', '--port', String(f.port), 'Work']);
+  assert.equal(started.code, 0, started.stderr); const ids = JSON.parse(started.stdout);
+  const waiting = f.command(['wait', 'recover', '--timeout', '15']);
+  const restarted = await f.command(['serve', '--restart', '--force', '--port', String(f.port)]);
+  assert.equal(restarted.code, 0, restarted.stderr);
+  const waited = await waiting; assert.equal(waited.code, 130, waited.stdout + waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).turnId, ids.turnId);
+  // Give the original logger a chance to persist its recovered completion and release ownership.
+  const { existsSync } = await import('node:fs');
+  await until(() => !existsSync(join(f.home, 'threads/recover.json.lock')), 'recovered logger');
+  const resumed = await f.command(['resume', 'recover', '--detach', 'Continue']);
+  assert.equal(resumed.code, 0, resumed.stderr); assert.equal(JSON.parse(resumed.stdout).threadId, ids.threadId);
+  assert.notEqual(JSON.parse(resumed.stdout).turnId, ids.turnId);
+  assert.equal((await f.command(['interrupt', 'recover'])).code, 0);
+  await until(() => !existsSync(join(f.home, 'threads/recover.json.lock')));
 });

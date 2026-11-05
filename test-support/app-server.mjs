@@ -11,7 +11,7 @@ function frame(message) {
   const header = body.length < 126 ? Buffer.from([0x81, body.length]) : Buffer.from([0x81, 126, body.length >> 8, body.length & 255]);
   return Buffer.concat([header, body]);
 }
-export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList } = {}) {
+export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile } = {}) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
@@ -21,6 +21,12 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   let nextTurn = 2, reads = 0, loseStartReply = false, lostReplyRateLimits = null;
   const threadId = 'thread-1';
   const threads = new Map([[threadId, turns]]);
+  if (historyFile && existsSync(historyFile)) {
+    threads.clear(); for (const [id, history] of JSON.parse(readFileSync(historyFile, 'utf8'))) threads.set(id, history);
+    turns.splice(0, turns.length, ...(threads.get(threadId) ?? [])); threads.set(threadId, turns);
+    nextTurn = 1 + Math.max(1, ...[...threads.values()].flat().map(t => Number(t.id.replace('turn-', '')) || 0));
+  }
+  const persist = () => { if (historyFile) writeFileSync(historyFile, JSON.stringify([...threads])); };
   let nextFork = 1;
   const server = createServer();
   function emit(method, params) { for (const socket of sockets) if (socket.subscribed) socket.write(frame({ method, params })); }
@@ -31,6 +37,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
       turn.items.push(item); emit('item/completed', { threadId: owner, turnId: turn.id, item });
     }
     turn.status = status; turn.error = status === 'failed' ? error ?? { message: 'Backend failed', codexErrorInfo: 'other', additionalDetails: null } : null;
+    persist();
     emit('turn/completed', { threadId: owner, turn: structuredClone(turn) });
   }
   server.on('upgrade', (request, socket, head) => {
@@ -64,14 +71,15 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
           case 'server/diagnostics': result = diagnostics ? diagnostics() : { diagnostics: ['PASSTHROUGH'] }; break;
           case 'thread/read': {
             if (params.threadId === 'missing') { socket.write(frame({ id, error: { code: -32001, message: 'Not found', data: { detail: 'original' } } })); continue; }
-            result = { thread: { id: threadId, cwd: home, turns } }; break;
+            result = { thread: { id: params.threadId, cwd: home, turns: threads.get(params.threadId) ?? turns } }; break;
           }
           case 'thread/start': socket.subscribed = true; result = { thread: { id: threadId, cwd: home }, model: params.model }; break;
           case 'thread/resume': socket.subscribed = true; result = { thread: { id: params.threadId, cwd: home, turns: threads.get(params.threadId) ?? turns } }; break;
           case 'thread/fork': { const id = `fork-${nextFork++}`; const history = structuredClone(threads.get(params.threadId) ?? turns); threads.set(id, history); result = { thread: { id, cwd: home, turns: history } }; break; }
           case 'model/list': result = { data: [], nextCursor: null }; break;
-          case 'account/read': result = { account: null, requiresOpenaiAuth: false }; break;
-          case 'account/rateLimits/read': result = { rateLimits: null, rateLimitsByLimitId: null }; break;
+          case 'account/read': result = typeof account === 'function' ? account() : account ?? { account: null, requiresOpenaiAuth: false }; break;
+          case 'account/rateLimits/read': result = typeof usage === 'function' ? usage() : usage ?? { rateLimits: null, rateLimitsByLimitId: null }; break;
+          case 'thread/loaded/list': result = { data: [...threads.keys()], nextCursor: null }; break;
           case 'thread/list': result = { data: [...threads.keys()].map(id => ({ id })), nextCursor: null }; break;
           case 'thread/archive': case 'thread/unarchive': case 'thread/revert': case 'thread/compact/start': case 'thread/name/set': result = {}; break;
           case 'thread/turns/list': {
@@ -87,7 +95,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
           }
           case 'turn/start': {
             const turn = { id: `turn-${nextTurn++}`, status: 'inProgress', items: [], error: null };
-            const history = threads.get(params.threadId) ?? turns; history.push(turn); socket.turnOwner = true; emit('turn/started', { threadId: params.threadId, turn });
+            const history = threads.get(params.threadId) ?? turns; history.push(turn); persist(); socket.turnOwner = true; emit('turn/started', { threadId: params.threadId, turn });
             if (loseStartReply) {
               loseStartReply = false;
               if (lostReplyRateLimits) { emit('account/rateLimits/updated', { rateLimits: lostReplyRateLimits }); lostReplyRateLimits = null; }
@@ -111,7 +119,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   function seed(overrides = {}) { writeFileSync(join(home, 'threads/demo.json'), JSON.stringify({ ...state, ...overrides })); }
   seed();
   function launch(args, { cwd, stdin } = {}) {
-    const child = spawn(process.execPath, [resolve('src/cli.mjs'), ...args], { env: { ...process.env, CODEX_DRIVE_HOME: home }, cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [resolve('src/cli.mjs'), ...args], { env: { ...process.env, CODEX_DRIVE_HOME: home, CODEX_HOME: join(home, 'codex') }, cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     if (stdin !== undefined) child.stdin.end(stdin);
     children.add(child); let stdout = '', stderr = '';
     child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });
@@ -133,9 +141,9 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
     await new Promise(resolve => server.close(resolve));
     rmSync(home, { recursive: true, force: true });
   });
-  return { home, port, state, seed, turns, threads, received, replies, complete, emit, request(method, params, id = 'server-1') { for (const socket of sockets) if (socket.turnOwner) socket.write(frame({ id, method, params })); }, launch, command, hasRead: () => reads > 0, pause(method) { paused.add(method); }, loseNextStartReply(rateLimits = null) { loseStartReply = true; lostReplyRateLimits = rateLimits; }, disconnect() { for (const socket of sockets) socket.destroy(); } };
+  return { home, port, state, seed, persist, turns, threads, received, replies, complete, emit, request(method, params, id = 'server-1') { for (const socket of sockets) if (socket.turnOwner) socket.write(frame({ id, method, params })); }, launch, command, hasRead: () => reads > 0, pause(method) { paused.add(method); }, loseNextStartReply(rateLimits = null) { loseStartReply = true; lostReplyRateLimits = rateLimits; }, disconnect() { for (const socket of sockets) socket.destroy(); } };
 }
 export async function until(check, label = 'condition') {
-  for (let n = 0; n < 200; n++) { const value = await check(); if (value) return value; await delay(25); }
+  for (let n = 0; n < 400; n++) { const value = await check(); if (value) return value; await delay(25); }
   throw new Error(`Timed out waiting for ${label}`);
 }

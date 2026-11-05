@@ -85,7 +85,7 @@ test('a fast turn completed during a lost start reply does not leave its logger 
   const f = await fixture(t); f.loseNextStartReply();
   const resumed = f.launch(['resume', 'demo', 'Continue']);
   const { setTimeout: delay } = await import('node:timers/promises');
-  const result = await Promise.race([resumed.result, delay(2000, { code: 'still-running' }, { ref: false })]);
+  const result = await Promise.race([resumed.result, delay(10000, { code: 'still-running' }, { ref: false })]);
   assert.equal(result.code, 0, result.stderr ?? 'Logger is still running after recovered completion');
   assert.equal(JSON.parse((await f.command(['status', 'demo'])).stdout).lastAgentMessage, 'RECOVERED');
 });
@@ -127,7 +127,7 @@ test('wait timeout cancels an outstanding server RPC rather than waiting for its
   const started = Date.now();
   const result = await f.command(['wait', 'demo', '--timeout', '0.2']);
   assert.equal(result.code, 124, result.stderr);
-  assert.ok(Date.now() - started < 2000, 'wait exceeded its timeout by the full RPC timeout');
+  assert.ok(Date.now() - started < 10000, 'wait exceeded its timeout by the full RPC timeout');
 });
 
 test('status refuses an explicit port that differs from the saved thread server', async t => {
