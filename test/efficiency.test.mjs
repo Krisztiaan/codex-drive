@@ -65,3 +65,13 @@ test('completion between resume and first snapshot is retained', async t => {
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).lastAgentMessage, 'RACED');
 });
+
+test('only wait observers opt out of unused streaming notifications', async t => {
+  const f = await fixture(t);
+  await f.command(['wait', 'demo']);
+  const { WAIT_NOTIFICATION_OPT_OUTS } = await import('../src/client.mjs');
+  assert.deepEqual(f.received.find(m => m.method === 'initialize').params.capabilities.optOutNotificationMethods, WAIT_NOTIFICATION_OPT_OUTS);
+  const before = f.received.length;
+  await f.command(['adopt', 'demo']);
+  assert.equal(f.received.slice(before).find(m => m.method === 'initialize').params.capabilities.optOutNotificationMethods, undefined);
+});

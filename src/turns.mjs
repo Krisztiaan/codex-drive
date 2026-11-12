@@ -281,7 +281,7 @@ export async function waitForTurn(store, options, key, report = value => console
     for (;;) {
       try {
         if (!rpc) {
-          rpc = await connection(state.port, controller.signal, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
+          rpc = await connection(state.port, controller.signal, { observer: true, threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
           rpc.on('event', event => {
             if (event.params?.threadId && event.params.threadId !== state.threadId) return;
             const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
