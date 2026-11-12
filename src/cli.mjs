@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, existsSync, openSync, closeSync, fstatSync, readSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { dirname, join } from 'node:path';
 import { setMaxListeners } from 'node:events';
 import { spawn } from 'node:child_process';
@@ -12,7 +13,7 @@ import { methods, methodSchema, validateCall } from './protocol.mjs';
 import { readJson, callParams, textInput, turnParams } from './params.mjs';
 import { connection } from './client.mjs';
 import { accountHealth, usageText } from './account.mjs';
-import { filterStates, table, recordSteer, pruneCandidates, removeSession } from './views.mjs';
+import { filterStates, table, recordSteer, pruneCandidates, removeSession, duration } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 import { pendingRequests, respond } from './requests.mjs';
 import { findState, portFor, snapshot, statusView, runAttached, waitForTurn, warning, effectiveState, attachedDefaults } from './turns.mjs';
@@ -31,10 +32,21 @@ function readable(event) {
 }
 async function events(state, follow) {
   let offset = 0, carry = '';
+  const decoder = new StringDecoder('utf8');
   do {
-    const contents = existsSync(state.logPath) ? readFileSync(state.logPath, 'utf8') : '';
-    if (contents.length < offset) throw new Error('Event log was truncated while following');
-    carry += contents.slice(offset); offset = contents.length;
+    if (existsSync(state.logPath)) {
+      const fd = openSync(state.logPath, 'r');
+      try {
+        const size = fstatSync(fd).size;
+        if (size < offset) throw new Error('Event log was truncated while following');
+        const buffer = Buffer.alloc(64 * 1024);
+        while (offset < size) {
+          const count = readSync(fd, buffer, 0, Math.min(buffer.length, size - offset), offset);
+          if (!count) break;
+          offset += count; carry += decoder.write(buffer.subarray(0, count));
+        }
+      } finally { closeSync(fd); }
+    }
     const boundary = carry.lastIndexOf('\n');
     if (boundary >= 0) {
       for (const line of carry.slice(0, boundary).split('\n').filter(Boolean)) {
@@ -81,7 +93,7 @@ const usage = `Usage: codex-drive <command>
   fork <name|threadId> [--name <new-name>] [--log <file>]
   wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
   status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob]
-  prune [--older-than 30d] [--apply]
+  prune [--calls] [--older-than 30d] [--apply]
   events <name|threadId> [--follow]
   tail <name|threadId> [-n 20]
   pending [<name|threadId>]
@@ -137,23 +149,31 @@ async function main() {
     for (const key of positional) portFor(options, store.read(key));
     const cancel = new AbortController(), codes = [];
     setMaxListeners(0, cancel.signal);
-    let winner = false;
+    let winner = false, winnerCode;
     const tasks = [...new Set(positional)].map(async key => {
-      let reported = false;
+      let reported = false, won = false;
       const report = value => {
         if (options.any && winner) return;
         reported = true; print(value);
-        if (options.any) { winner = true; cancel.abort(new Error('Another goal settled')); }
+        if (options.any && !value.timedOut) { winner = true; won = true; cancel.abort(new Error('Another goal settled')); }
       };
       try {
         const code = await waitForTurn(store, options, key, report, cancel.signal);
-        if (code != null && reported) codes.push(code);
-      } catch (error) { if (!cancel.signal.aborted) { report({ name: key, error: error.message }); codes.push(1); } }
+        if (code != null && reported) { codes.push(code); if (won) winnerCode = code; }
+      } catch (error) { if (!cancel.signal.aborted) { print({ name: key, error: error.message }); codes.push(error.exitCode ?? 1); } }
     });
     await Promise.all(tasks);
-    process.exitCode = codes.includes(76) ? 76 : Math.max(0, ...codes); return;
+    process.exitCode = winnerCode ?? (codes.includes(76) ? 76 : Math.max(0, ...codes)); return;
   }
   if (command === 'prune') {
+    if (options.calls) {
+      const age = options['older-than'] ?? '30d';
+      const cutoff = Date.now() - duration(/^\d+(?:\.\d+)?$/.test(age) ? age + 'd' : age);
+      const dir = join(store.home, 'calls');
+      const calls = existsSync(dir) ? readdirSync(dir).filter(name => name.endsWith('.jsonl') && statSync(join(dir, name)).isFile() && statSync(join(dir, name)).mtimeMs < cutoff) : [];
+      if (options.apply) for (const name of calls) unlinkSync(join(dir, name));
+      print({ dryRun: !options.apply, calls }); return;
+    }
     const removed = [];
     for (const state of pruneCandidates(store, options['older-than'])) {
       if (options.apply) {
@@ -240,7 +260,7 @@ async function main() {
       return;
     }
     if (!state) throw new Error('Unknown thread; adopt it first');
-    await rpc.request('thread/resume', { threadId: state.threadId }); await snapshot(rpc, state);
+    await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: true }); await snapshot(rpc, state);
     if (state.status !== 'running') throw new Error(`No turn is running (${state.status})`);
     const turnId = options.turn ?? state.turnId;
     if (command === 'steer') {

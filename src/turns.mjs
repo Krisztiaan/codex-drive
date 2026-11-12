@@ -7,11 +7,12 @@ import { RequestBroker, pendingRequests } from './requests.mjs';
 import { textInput, turnParams } from './params.mjs';
 import { validateCall } from './protocol.mjs';
 import { exitCode, failureDetails } from './failures.mjs';
-import { connection, journal } from './client.mjs';
+import { connection, journal, lifecycleEvent } from './client.mjs';
 import { accountHealth } from './account.mjs';
 import { steersFor } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
+const reconnectDelay = () => 500 + Math.floor(Math.random() * 251);
 export const terminal = status => ['completed', 'failed', 'interrupted', 'idle'].includes(status);
 export function findState(store, key) {
   const all = store.all();
@@ -27,17 +28,34 @@ export function statusView(store, state) {
 export async function snapshot(rpc, state, signal, targetTurnId) {
   let cursor, turn;
   do {
-    const page = await rpc.request('thread/turns/list', { threadId: state.threadId, limit: targetTurnId ? 20 : 1, sortDirection: 'desc', itemsView: 'full', ...(cursor ? { cursor } : {}) }, { signal });
+    const page = await rpc.request('thread/turns/list', { threadId: state.threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) }, { signal });
     turn = targetTurnId ? page.data.find(turn => turn.id === targetTurnId) : page.data[0]; cursor = page.nextCursor;
   } while (!turn && cursor);
   if (!turn) {
     if (targetTurnId) throw new Error(`Turn ${targetTurnId} is unavailable`);
     state.turnId = null; state.status = 'idle'; state.error = null; state.lastAgentMessage = null; state.failure = null; return;
   }
+  if (state.turnId !== turn.id || turn.status === 'inProgress' && terminal(state.status)) state.lastAgentMessage = null;
   state.turnId = turn.id; state.status = turn.status === 'inProgress' ? 'running' : turn.status; state.error = turn.error;
-  const message = turn.items.filter(item => item.type === 'agentMessage' && item.text.trim()).at(-1);
-  state.lastAgentMessage = message ? message.text.trim().split('\n').filter(Boolean).at(-1) ?? null : null;
+  if (terminal(state.status) && state.lastAgentMessage == null) await finalMessage(rpc, state, signal);
   state.failure = state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null;
+}
+// Items are fetched only for a settled target lacking an event-captured message.
+// Summary turns can omit commentary, including the last message before failure.
+const messageReads = new WeakMap();
+async function finalMessage(rpc, state, signal) {
+  let read = messageReads.get(rpc);
+  if (!read) messageReads.set(rpc, read = new Set());
+  const key = state.threadId + ':' + state.turnId;
+  if (read.has(key)) return;
+  let cursor;
+  do {
+    const page = await rpc.request('thread/items/list', { threadId: state.threadId, turnId: state.turnId, sortDirection: 'desc', limit: 1, ...(cursor ? { cursor } : {}) }, { signal });
+    const item = page.data.find(entry => entry.item.type === 'agentMessage' && entry.item.text.trim())?.item;
+    if (item) { applyEvent(state, { method: 'item/completed', params: { threadId: state.threadId, turnId: state.turnId, item } }); break; }
+    cursor = page.nextCursor;
+  } while (cursor);
+  read.add(key);
 }
 export function warning(state) {
   if (state.sandbox === 'danger-full-access' || state.sandboxPolicy?.type === 'dangerFullAccess') console.error(`WARNING: danger-full-access; approval=${typeof state.approval === 'string' ? state.approval : JSON.stringify(state.approvalPolicy)}. Codex can modify files and run commands without sandbox protection.`);
@@ -53,7 +71,7 @@ export function effectiveState(state, result) {
   if (result.activePermissionProfile !== undefined) state.activePermissionProfile = result.activePermissionProfile;
 }
 export function attachedDefaults(options, state, prompt, command) {
-  const thread = {}, turn = { input: prompt === undefined ? [] : textInput(prompt) };
+  const thread = { ...(command !== 'start' ? { excludeTurns: true } : {}) }, turn = { input: prompt === undefined ? [] : textInput(prompt) };
   for (const key of ['cwd', 'model']) if (options[key] !== undefined) thread[key] = turn[key] = options[key];
   if (options.sandbox || !state) thread.sandbox = options.sandbox ?? DEFAULT_PERMISSIONS.sandbox;
   if (options.approval || !state) thread.approvalPolicy = turn.approvalPolicy = options.approval ?? DEFAULT_PERMISSIONS.approval;
@@ -85,7 +103,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   };
   const onInt = () => onSignal('SIGINT'), onTerm = () => onSignal('SIGTERM');
   const logPath = options.log ?? state?.logPath ?? join(store.home, 'logs', randomUUID() + '.jsonl');
-  const log = journal(logPath), buffered = [];
+  const log = journal(logPath, { buffered: true, onError: error => rejectDone(error) }), buffered = [];
   const brokerLog = event => { log(event); if (event.method === 'driver/requestPending') console.error(JSON.stringify(event)); };
   const broker = new RequestBroker({ home: store.home, log: brokerLog, policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId ?? (command === 'start' ? undefined : key) });
   let unlock = options.name || state ? store.lock(state?.name ?? options.name ?? key) : () => {};
@@ -96,11 +114,17 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   const newDone = () => { const promise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; }); promise.catch(() => {}); return promise; };
   let done = newDone();
   process.once('SIGINT', onInt); process.once('SIGTERM', onTerm);
+  let saveTimer, dirty = false;
+  function flushState() { clearTimeout(saveTimer); saveTimer = null; if (dirty && state) { store.save(state); dirty = false; } }
   function reduce(event) {
     if (!ready) { buffered.push(event); return; }
     const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
     if (ownedTurnId && eventTurnId && eventTurnId !== ownedTurnId) return;
-    if (applyEvent(state, event)) store.save(state);
+    if (applyEvent(state, event)) {
+      dirty = true;
+      if (lifecycleEvent(event)) flushState();
+      else saveTimer ??= setTimeout(() => { try { flushState(); } catch (error) { rejectDone(error); } }, 1000).unref();
+    }
     if (terminal(state.status)) resolveDone();
   }
   function wire(client) {
@@ -118,9 +142,9 @@ export async function runAttached(store, command, options, key, prompt, readyCal
         for (let attempt = 1; attempt <= 15 && !shuttingDown; attempt++) {
           let next;
           try {
-            await delay(500, undefined, { signal: controller.signal }); if (shuttingDown) return;
+            await delay(reconnectDelay(), undefined, { signal: controller.signal }); if (shuttingDown) return;
             next = new Rpc(port); rpc = next; wire(next); await next.connect(controller.signal);
-            await next.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal }); await snapshot(next, state, controller.signal, ownedTurnId);
+            await next.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal }); await snapshot(next, state, controller.signal, ownedTurnId);
             if (shuttingDown) return;
             if (next.socket.readyState !== WebSocket.OPEN) throw new Error('Recovery socket closed');
             log({ method: 'driver/reconnected', params: { threadId: state.threadId, turnId: state.turnId, status: state.status } });
@@ -142,8 +166,8 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       let recovered = false;
       for (let attempt = 0; attempt < 15; attempt++) {
         try {
-          await delay(500, undefined, { signal: controller.signal }); rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
-          await rpc.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal }); await snapshot(rpc, state, controller.signal);
+          await delay(reconnectDelay(), undefined, { signal: controller.signal }); rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
+          await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal }); await snapshot(rpc, state, controller.signal);
           if (state.turnId && state.turnId !== priorTurnId) {
             for (const event of buffered) if (event.method === 'account/rateLimits/updated') applyEvent(state, event);
             buffered.length = 0; state.lastEventTime = new Date().toISOString();
@@ -227,11 +251,12 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     releaseServer?.();
     shuttingDown = true;
     await broker.close(); rpc?.close(); await recoveryTask; rpc?.close();
-    process.off('SIGINT', onInt); process.off('SIGTERM', onTerm); unlock();
+    try { flushState(); log.flush(); } finally { process.off('SIGINT', onInt); process.off('SIGTERM', onTerm); unlock(); }
   }
 }
 export async function waitForTurn(store, options, key, report = value => console.log(JSON.stringify(value)), externalSignal) {
   const state = store.read(key); portFor(options, state);
+  state.lastAgentMessage = null;
   const completions = new Map();
   const rememberFailure = known => {
     if (known.turnId && known.status === 'failed' && !completions.has(known.turnId)) {
@@ -245,14 +270,27 @@ export async function waitForTurn(store, options, key, report = value => console
   externalSignal?.addEventListener('abort', cancel, { once: true });
   if (externalSignal?.aborted) cancel();
   const timer = options.timeout ? setTimeout(() => controller.abort(new Error('Wait timed out')), Number(options.timeout) * 1000) : null;
-  let rpc;
+  let rpc, wake, pendingWake = false;
+  const notify = () => { pendingWake = true; wake?.(); };
+  const waitUntil = async deadline => {
+    if (pendingWake) { pendingWake = false; return; }
+    await new Promise((resolve, reject) => {
+      const finish = () => { clearTimeout(timeout); controller.signal.removeEventListener('abort', abort); wake = null; resolve(); };
+      const abort = () => { finish(); reject(controller.signal.reason); };
+      const timeout = setTimeout(finish, Math.max(0, deadline - Date.now()));
+      wake = finish; controller.signal.addEventListener('abort', abort, { once: true });
+      if (controller.signal.aborted) abort();
+    });
+    pendingWake = false;
+  };
   try {
-    let targetTurnId, failures = 0;
+    let targetTurnId, failures = 0, interval = 1000, nextSnapshot = 0;
     for (;;) {
       try {
         if (!rpc) {
-          rpc = await connection(state.port, controller.signal, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
+          rpc = await connection(state.port, controller.signal, { observer: true, threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
           rpc.on('event', event => {
+            if (event.params?.threadId && event.params.threadId !== state.threadId) return;
             const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
             if (!targetTurnId || !eventTurnId || eventTurnId === targetTurnId) {
               applyEvent(state, event);
@@ -262,10 +300,16 @@ export async function waitForTurn(store, options, key, report = value => console
                   ...(state.turnId === eventTurnId && state.lastAgentMessage != null ? { lastAgentMessage: state.lastAgentMessage } : {}) });
               }
             }
+            notify();
           });
-          await rpc.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal });
+          rpc.on('disconnect', notify);
+          await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: true }, { signal: controller.signal });
+          nextSnapshot = 0; interval = 1000;
         }
-        await snapshot(rpc, state, controller.signal, targetTurnId);
+        if (Date.now() >= nextSnapshot) {
+          await snapshot(rpc, state, controller.signal, targetTurnId);
+          nextSnapshot = Date.now() + interval; interval = Math.min(10000, interval * 2);
+        }
         if (!state.turnId) throw new Error('Thread has no current turn');
         targetTurnId ??= state.turnId; failures = 0;
         // History snapshots can lose terminal errors. The observed completion
@@ -273,12 +317,16 @@ export async function waitForTurn(store, options, key, report = value => console
         if (terminal(state.status) && !completions.has(state.turnId)) rememberFailure(store.read(key));
         const completion = completions.get(state.turnId);
         if (completion) Object.assign(state, completion);
-        if (terminal(state.status)) break;
-        await delay(100, undefined, { signal: controller.signal });
+        if (terminal(state.status)) {
+          if (state.lastAgentMessage == null) await finalMessage(rpc, state, controller.signal);
+          break;
+        }
+        if (rpc.socket.readyState !== WebSocket.OPEN) throw new Error('Wait socket closed');
+        await waitUntil(nextSnapshot);
       } catch (error) {
-        if (controller.signal.aborted || error.rpcError || rpc?.socket.readyState === WebSocket.OPEN) throw error;
+        if (controller.signal.aborted || error.rpcError || !error.requestTimeout && rpc?.socket.readyState === WebSocket.OPEN) throw error;
         await rpc?.close(); rpc = null; if (++failures > 15) throw error;
-        await delay(100, undefined, { signal: controller.signal });
+        await delay(reconnectDelay(), undefined, { signal: controller.signal });
       }
     }
     const result = statusView(store, state); report(result); return exitCode(state);

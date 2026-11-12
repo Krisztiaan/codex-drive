@@ -56,8 +56,9 @@ export async function activeTurns(port) {
     do {
       const page = await rpc.request('thread/loaded/list', { ...(cursor ? { cursor } : {}) });
       for (const id of page.data) {
-        const { thread } = await rpc.request('thread/read', { threadId: id, includeTurns: true });
-        if (thread.turns?.some(t => t.status === 'inProgress')) active.push(id);
+        const { thread } = await rpc.request('thread/read', { threadId: id, includeTurns: false });
+        if (!['idle', 'active'].includes(thread.status?.type)) throw new Error('Unknown or unreadable thread status: ' + id);
+        if (thread.status.type === 'active') active.push(id);
       }
       cursor = page.nextCursor;
     } while (cursor);
