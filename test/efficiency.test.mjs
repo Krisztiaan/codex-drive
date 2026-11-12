@@ -103,3 +103,17 @@ test('logger buffers noisy journal writes and flushes lifecycle records', async 
   assert.equal(readFileSync(f.state.logPath, 'utf8').trim().split('\n').length, 2);
   log.flush();
 });
+
+test('serve inspection uses metadata and treats approval waiting as active', async t => {
+  const f = await fixture(t);
+  f.turns[0].status = 'inProgress';
+  const { activeTurns } = await import('../src/server.mjs');
+  const previous = process.env.CODEX_DRIVE_HOME; process.env.CODEX_DRIVE_HOME = f.home;
+  try {
+    assert.deepEqual(await activeTurns(f.port), ['demo']);
+    assert.ok(f.received.filter(m => m.method === 'thread/read').every(m => m.params.includeTurns === false));
+    f.turns[0].status = 'completed';
+    assert.deepEqual(await activeTurns(f.port), []);
+  } finally { if (previous === undefined) delete process.env.CODEX_DRIVE_HOME; else process.env.CODEX_DRIVE_HOME = previous; }
+});
+
