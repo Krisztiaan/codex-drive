@@ -111,3 +111,34 @@ deliberately did not do) and committed.
   Outcome, and stop.
 - Allowed early stops: a protocol fact that contradicts this brief (record it in the Outcome), or a test that looks wrong.
 - Short final report.
+
+## Outcome
+
+Completed A–I on `goal/efficiency`; stopped with commits only, without merging or pushing.
+
+- **A:** Internal resumes default to `excludeTurns:true`, including reconnect, lost-start recovery and steer/interrupt. Explicit composed overrides also survive logger recovery; raw calls remain unchanged. Inspection of every `thread/resume` consumer found no dependency on returned `thread.turns`. The remaining `thread.turns` inspection was serve's read path and is removed by F. The checked-in schema explicitly supports metadata plus live-resume state with `excludeTurns`. CLI status/error still comes from turn metadata; warm-resume rate-limit replay has fixture coverage. Token-usage notifications remain enabled; current CLI views do not consume/display `thread/tokenUsage/updated`. No live-server replay qualification was attempted.
+- **B–D:** Snapshots page one turn at a time with `itemsView:'notLoaded'`, preserving target identity, status and errors without item hydration. Completed agent-message events supply the last message. If absent at settlement, a single target-only search uses descending `thread/items/list` pages, stopping at the first nonblank agent message. `summary` can omit commentary and is not used as the sole failed/interrupted-message source. Listeners are installed before resume; observed completions are cached per thread's turn, and every connect/reconnect immediately snapshots. Backstop intervals are 1/2/4/8/10 seconds, with a deadline unaffected by continuous traffic. Wait observers alone use the named six-method delta opt-out list; attached loggers retain the full stream.
+- **E:** Logger state saves and buffered raw-journal appends flush on lifecycle events, otherwise at most once per second, and on exit. Persisted `lastEventTime` may be one second stale. Wait call journals retain lifecycle/error/server-request records rather than all events. `events --follow` reads appended bytes and decodes UTF-8 incrementally. `prune --calls` is explicit and dry-run by default; `--apply` removes only age-selected call `.jsonl` files. No automatic retention policy was introduced; pruning tests ran only against temporary fixture homes. No prune/delete was run against either real history directory.
+- **F:** Loaded-thread inspection uses `thread/read includeTurns:false` and `thread.status`. Only known idle status permits an ordinary stop/restart; active threads, including approval-waiting threads, count as active. Unknown, not-loaded, system-error and unreadable status fail closed.
+- **G:** `--any` prints an observer error without cancelling peers; only a settled turn wins, and its code determines success/failure. All-error remains nonzero; timeouts do not win over a later settlement. Open-socket RPC timeouts are retryable only within the wait recovery flow. Wait/logger reconnect delays are 500–750 ms with jitter and 15 retries; this increases wait's reconnect-delay budget from about 1.5 seconds to 7.5–11.25 seconds, excluding connection/request time. Mutations are never replayed. Exit-code coverage retains 0/1/75/76/124/130.
+- **H–I:** The fixture now honours history exclusion, item views, metadata status and notification opt-outs; it records method/params/timestamps and exposes grouped request counts. Fixed its extended WebSocket-frame decoder: a decoded payload length of 127 must not be interpreted again as a 64-bit length marker. Added offline request-mix/baseline regression tooling and README guidance.
+
+### Measured request mix
+
+Source: `node test-support/request-mix.mjs edf0a93 --regressions`, comparing main at `edf0a93d59b48479514f08d9a0483f226380df61` with this implementation. Seven concurrent threads, one running turn each, `wait --any`, no streaming traffic, fixture server and temporary homes. The steady window starts after all seven initial snapshots; each window lasted 4.001 seconds and ended with an event-driven completion. Both CLI runs exited 0.
+
+| Method / view | Main steady count | After steady count | Main requests/s | After requests/s |
+| --- | ---: | ---: | ---: | ---: |
+| `thread/turns/list / full` | 272 | 0 | 67.98 | 0 |
+| `thread/turns/list / notLoaded` | 0 | 14 | 0 | 3.50 |
+| All other methods | 0 | 0 | 0 | 0 |
+
+Inputs: 272 / 4.001 seconds versus 14 / 4.001 seconds; per waited thread about 9.71/s versus 0.50/s. Reduction in steady reconciliation requests: `(272 - 14) / 272 = 94.9%`. Across the entire runs, initialize and resume were seven requests each on both sides; turn-list requests were 286 full before versus 21 notLoaded after. Neither run needed a terminal item fetch because the message was captured from the event stream. These are fixture request counts, not CPU, latency-distribution, history-byte, cost or live-database measurements.
+
+### Verification and limits
+
+- Installed dependencies with `npm ci` because `node_modules` was missing. Its audit reported one moderate dependency vulnerability; dependency upgrades were outside this pass.
+- Final `npm test`: **144 passed, 0 failed**, Node 26.13.0 (repository requires >=24), file concurrency 2. Focused efficiency suite: 16 cases, including prompt event completion without another poll, continuous-traffic reconciliation, missed/disconnected completions, older targets, open-socket timeout recovery, logger write coalescing, warm replay and explicit override recovery. Existing failure/recovery tests retain structured error and exit-code coverage.
+- Baseline proof: all **five selected A/B/C/G/F tests fail** against the temporary main source copy (0 passed / 5 failed), and pass against the implementation. No main checkout edits were used. `git diff --check` passed.
+- `npm run proof` was deliberately **not run**: `scripts/proof.mjs` declares itself live and billable, copies authentication and launches a real app-server. It does not meet this brief's offline-fixture condition. All executed servers were owned fixtures on ephemeral ports; no live port 4700/4701 process was attached to, signalled or restarted.
+- Deliberately unchanged: one connection per waited thread, legacy-history replay cost inside the server, server-side SQLite/storage behaviour, existing serve inspection cadence, real history retention, protocol generation and dependencies. Buffered non-lifecycle logger events can be lost on a hard kill; graceful exits flush. Live app-server CPU and warm-resume replay details remain unmeasured.
