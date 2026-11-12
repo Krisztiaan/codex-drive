@@ -117,3 +117,44 @@ test('serve inspection uses metadata and treats approval waiting as active', asy
   } finally { if (previous === undefined) delete process.env.CODEX_DRIVE_HOME; else process.env.CODEX_DRIVE_HOME = previous; }
 });
 
+test('--any reports one observer error and still waits for a real completion', async t => {
+  const f = await fixture(t);
+  const { writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  writeFileSync(join(f.home, 'threads/broken.json'), JSON.stringify({ ...f.state, name: 'broken', threadId: 'bad-thread' }));
+  // An empty history produces a protocol error rather than a settled turn.
+  f.threads.set('bad-thread', []);
+  f.turns[0].status = 'inProgress'; f.turns[0].items = [];
+  f.seed({ status: 'running', lastAgentMessage: null });
+  const waiter = f.launch(['wait', 'broken', 'demo', '--any', '--timeout', '3']);
+  await until(() => waiter.stdout().includes('error'));
+  f.complete('completed', 'SURVIVOR');
+  const result = await waiter.result;
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(result.stdout.includes('SURVIVOR'));
+});
+
+test('--any all-error exits nonzero', async t => {
+  const f = await fixture(t);
+  const { writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  writeFileSync(join(f.home, 'threads/broken.json'), JSON.stringify({ ...f.state, name: 'broken', threadId: 'bad-thread' }));
+  f.threads.set('bad-thread', []); f.turns.length = 0;
+  assert.equal((await f.command(['wait', 'broken', 'demo', '--any'])).code, 1);
+});
+
+test('open-socket RPC timeout is retried by wait without replaying mutations', async t => {
+  let reads = 0;
+  const f = await fixture(t, { turnsList: (params, result) => ++reads === 1 ? new Promise(() => {}) : result });
+  const { waitForTurn } = await import('../src/turns.mjs');
+  const { Store } = await import('../src/state.mjs');
+  const actual = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => actual(fn, ms === 30000 ? 20 : ms, ...args));
+  const previous = process.env.CODEX_DRIVE_HOME; process.env.CODEX_DRIVE_HOME = f.home;
+  try {
+    assert.equal(await waitForTurn(new Store(f.home), {}, 'demo', () => {}), 0);
+    assert.equal(reads, 2);
+    assert.equal(f.received.filter(m => m.method === 'thread/resume').length, 2);
+    assert.equal(f.received.filter(m => m.method === 'turn/start').length, 0);
+  } finally { if (previous === undefined) delete process.env.CODEX_DRIVE_HOME; else process.env.CODEX_DRIVE_HOME = previous; }
+});

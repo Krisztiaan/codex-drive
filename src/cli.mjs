@@ -149,21 +149,21 @@ async function main() {
     for (const key of positional) portFor(options, store.read(key));
     const cancel = new AbortController(), codes = [];
     setMaxListeners(0, cancel.signal);
-    let winner = false;
+    let winner = false, winnerCode;
     const tasks = [...new Set(positional)].map(async key => {
-      let reported = false;
+      let reported = false, won = false;
       const report = value => {
         if (options.any && winner) return;
         reported = true; print(value);
-        if (options.any) { winner = true; cancel.abort(new Error('Another goal settled')); }
+        if (options.any && !value.timedOut) { winner = true; won = true; cancel.abort(new Error('Another goal settled')); }
       };
       try {
         const code = await waitForTurn(store, options, key, report, cancel.signal);
-        if (code != null && reported) codes.push(code);
-      } catch (error) { if (!cancel.signal.aborted) { report({ name: key, error: error.message }); codes.push(1); } }
+        if (code != null && reported) { codes.push(code); if (won) winnerCode = code; }
+      } catch (error) { if (!cancel.signal.aborted) { print({ name: key, error: error.message }); codes.push(error.exitCode ?? 1); } }
     });
     await Promise.all(tasks);
-    process.exitCode = codes.includes(76) ? 76 : Math.max(0, ...codes); return;
+    process.exitCode = winnerCode ?? (codes.includes(76) ? 76 : Math.max(0, ...codes)); return;
   }
   if (command === 'prune') {
     if (options.calls) {

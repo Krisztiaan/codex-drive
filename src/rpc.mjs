@@ -41,7 +41,7 @@ export class Rpc extends EventEmitter {
       const onAbort = () => { clearTimeout(timer); this.pending.delete(id); reject(signal.reason); };
       signal?.addEventListener('abort', onAbort, { once: true });
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
-      const timer = setTimeout(() => { cleanup(); this.pending.delete(id); reject(new Error(`${method} timed out; outcome may be unknown (not retried)`)); }, 30000);
+      const timer = setTimeout(() => { cleanup(); this.pending.delete(id); reject(Object.assign(new Error(`${method} timed out; outcome may be unknown (not retried)`), { requestTimeout: true })); }, 30000);
       this.pending.set(id, { resolve, reject, timer, cleanup });
       try { this.send({ id, method, params }); } catch (e) { cleanup(); this.pending.delete(id); reject(e); }
     });

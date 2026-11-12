@@ -12,6 +12,7 @@ import { accountHealth } from './account.mjs';
 import { steersFor } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
+const reconnectDelay = () => 500 + Math.floor(Math.random() * 251);
 export const terminal = status => ['completed', 'failed', 'interrupted', 'idle'].includes(status);
 export function findState(store, key) {
   const all = store.all();
@@ -141,7 +142,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
         for (let attempt = 1; attempt <= 15 && !shuttingDown; attempt++) {
           let next;
           try {
-            await delay(500, undefined, { signal: controller.signal }); if (shuttingDown) return;
+            await delay(reconnectDelay(), undefined, { signal: controller.signal }); if (shuttingDown) return;
             next = new Rpc(port); rpc = next; wire(next); await next.connect(controller.signal);
             await next.request('thread/resume', { threadId: state.threadId, excludeTurns: true }, { signal: controller.signal }); await snapshot(next, state, controller.signal, ownedTurnId);
             if (shuttingDown) return;
@@ -165,7 +166,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       let recovered = false;
       for (let attempt = 0; attempt < 15; attempt++) {
         try {
-          await delay(500, undefined, { signal: controller.signal }); rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
+          await delay(reconnectDelay(), undefined, { signal: controller.signal }); rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
           await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: true }, { signal: controller.signal }); await snapshot(rpc, state, controller.signal);
           if (state.turnId && state.turnId !== priorTurnId) {
             for (const event of buffered) if (event.method === 'account/rateLimits/updated') applyEvent(state, event);
@@ -323,9 +324,9 @@ export async function waitForTurn(store, options, key, report = value => console
         if (rpc.socket.readyState !== WebSocket.OPEN) throw new Error('Wait socket closed');
         await waitUntil(nextSnapshot);
       } catch (error) {
-        if (controller.signal.aborted || error.rpcError || rpc?.socket.readyState === WebSocket.OPEN) throw error;
+        if (controller.signal.aborted || error.rpcError || !error.requestTimeout && rpc?.socket.readyState === WebSocket.OPEN) throw error;
         await rpc?.close(); rpc = null; if (++failures > 15) throw error;
-        await delay(100, undefined, { signal: controller.signal });
+        await delay(reconnectDelay(), undefined, { signal: controller.signal });
       }
     }
     const result = statusView(store, state); report(result); return exitCode(state);
