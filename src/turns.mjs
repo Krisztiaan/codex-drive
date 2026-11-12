@@ -53,7 +53,7 @@ export function effectiveState(state, result) {
   if (result.activePermissionProfile !== undefined) state.activePermissionProfile = result.activePermissionProfile;
 }
 export function attachedDefaults(options, state, prompt, command) {
-  const thread = {}, turn = { input: prompt === undefined ? [] : textInput(prompt) };
+  const thread = { ...(command !== 'start' ? { excludeTurns: true } : {}) }, turn = { input: prompt === undefined ? [] : textInput(prompt) };
   for (const key of ['cwd', 'model']) if (options[key] !== undefined) thread[key] = turn[key] = options[key];
   if (options.sandbox || !state) thread.sandbox = options.sandbox ?? DEFAULT_PERMISSIONS.sandbox;
   if (options.approval || !state) thread.approvalPolicy = turn.approvalPolicy = options.approval ?? DEFAULT_PERMISSIONS.approval;
@@ -120,7 +120,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
           try {
             await delay(500, undefined, { signal: controller.signal }); if (shuttingDown) return;
             next = new Rpc(port); rpc = next; wire(next); await next.connect(controller.signal);
-            await next.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal }); await snapshot(next, state, controller.signal, ownedTurnId);
+            await next.request('thread/resume', { threadId: state.threadId, excludeTurns: true }, { signal: controller.signal }); await snapshot(next, state, controller.signal, ownedTurnId);
             if (shuttingDown) return;
             if (next.socket.readyState !== WebSocket.OPEN) throw new Error('Recovery socket closed');
             log({ method: 'driver/reconnected', params: { threadId: state.threadId, turnId: state.turnId, status: state.status } });
@@ -143,7 +143,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       for (let attempt = 0; attempt < 15; attempt++) {
         try {
           await delay(500, undefined, { signal: controller.signal }); rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
-          await rpc.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal }); await snapshot(rpc, state, controller.signal);
+          await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: true }, { signal: controller.signal }); await snapshot(rpc, state, controller.signal);
           if (state.turnId && state.turnId !== priorTurnId) {
             for (const event of buffered) if (event.method === 'account/rateLimits/updated') applyEvent(state, event);
             buffered.length = 0; state.lastEventTime = new Date().toISOString();
@@ -263,7 +263,7 @@ export async function waitForTurn(store, options, key, report = value => console
               }
             }
           });
-          await rpc.request('thread/resume', { threadId: state.threadId }, { signal: controller.signal });
+          await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: true }, { signal: controller.signal });
         }
         await snapshot(rpc, state, controller.signal, targetTurnId);
         if (!state.turnId) throw new Error('Thread has no current turn');

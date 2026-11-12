@@ -240,7 +240,7 @@ async function main() {
       return;
     }
     if (!state) throw new Error('Unknown thread; adopt it first');
-    await rpc.request('thread/resume', { threadId: state.threadId }); await snapshot(rpc, state);
+    await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: true }); await snapshot(rpc, state);
     if (state.status !== 'running') throw new Error(`No turn is running (${state.status})`);
     const turnId = options.turn ?? state.turnId;
     if (command === 'steer') {
