@@ -33,3 +33,35 @@ test('snapshots page older targets without hydration and fetch commentary only f
     assert.equal(items.length, 1); assert.equal(items[0].params.turnId, 'turn-1');
   } finally { rpc.close(); }
 });
+
+test('quiet wait backs off while events complete promptly without another poll', async t => {
+  const f = await fixture(t);
+  f.turns[0].status = 'inProgress'; f.turns[0].items = [];
+  f.seed({ status: 'running', lastAgentMessage: null });
+  const waiter = f.launch(['wait', 'demo', '--timeout', '8']);
+  await until(f.hasRead);
+  const { setTimeout: delay } = await import('node:timers/promises');
+  await delay(3300);
+  const reads = f.received.filter(m => m.method === 'thread/turns/list');
+  assert.ok(reads.length <= 3, String(reads.length));
+  const before = reads.length, start = Date.now();
+  f.complete('completed', 'EVENT');
+  const result = await waiter.result;
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(Date.now() - start < 500);
+  assert.equal(f.received.filter(m => m.method === 'thread/turns/list').length, before);
+  assert.equal(JSON.parse(result.stdout).lastAgentMessage, 'EVENT');
+});
+
+test('completion between resume and first snapshot is retained', async t => {
+  let f;
+  f = await fixture(t, { turnsList: async (params, result) => {
+    f.complete('completed', 'RACED');
+    return result;
+  } });
+  f.turns[0].status = 'inProgress'; f.turns[0].items = [];
+  f.seed({ status: 'running', lastAgentMessage: null });
+  const result = await f.command(['wait', 'demo', '--timeout', '2']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).lastAgentMessage, 'RACED');
+});

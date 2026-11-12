@@ -263,14 +263,27 @@ export async function waitForTurn(store, options, key, report = value => console
   externalSignal?.addEventListener('abort', cancel, { once: true });
   if (externalSignal?.aborted) cancel();
   const timer = options.timeout ? setTimeout(() => controller.abort(new Error('Wait timed out')), Number(options.timeout) * 1000) : null;
-  let rpc;
+  let rpc, wake, pendingWake = false;
+  const notify = () => { pendingWake = true; wake?.(); };
+  const waitUntil = async deadline => {
+    if (pendingWake) { pendingWake = false; return; }
+    await new Promise((resolve, reject) => {
+      const finish = () => { clearTimeout(timeout); controller.signal.removeEventListener('abort', abort); wake = null; resolve(); };
+      const abort = () => { finish(); reject(controller.signal.reason); };
+      const timeout = setTimeout(finish, Math.max(0, deadline - Date.now()));
+      wake = finish; controller.signal.addEventListener('abort', abort, { once: true });
+      if (controller.signal.aborted) abort();
+    });
+    pendingWake = false;
+  };
   try {
-    let targetTurnId, failures = 0;
+    let targetTurnId, failures = 0, interval = 1000, nextSnapshot = 0;
     for (;;) {
       try {
         if (!rpc) {
           rpc = await connection(state.port, controller.signal, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
           rpc.on('event', event => {
+            if (event.params?.threadId && event.params.threadId !== state.threadId) return;
             const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
             if (!targetTurnId || !eventTurnId || eventTurnId === targetTurnId) {
               applyEvent(state, event);
@@ -280,10 +293,16 @@ export async function waitForTurn(store, options, key, report = value => console
                   ...(state.turnId === eventTurnId && state.lastAgentMessage != null ? { lastAgentMessage: state.lastAgentMessage } : {}) });
               }
             }
+            notify();
           });
+          rpc.on('disconnect', notify);
           await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: true }, { signal: controller.signal });
+          nextSnapshot = 0; interval = 1000;
         }
-        await snapshot(rpc, state, controller.signal, targetTurnId);
+        if (Date.now() >= nextSnapshot) {
+          await snapshot(rpc, state, controller.signal, targetTurnId);
+          nextSnapshot = Date.now() + interval; interval = Math.min(10000, interval * 2);
+        }
         if (!state.turnId) throw new Error('Thread has no current turn');
         targetTurnId ??= state.turnId; failures = 0;
         // History snapshots can lose terminal errors. The observed completion
@@ -291,8 +310,12 @@ export async function waitForTurn(store, options, key, report = value => console
         if (terminal(state.status) && !completions.has(state.turnId)) rememberFailure(store.read(key));
         const completion = completions.get(state.turnId);
         if (completion) Object.assign(state, completion);
-        if (terminal(state.status)) break;
-        await delay(100, undefined, { signal: controller.signal });
+        if (terminal(state.status)) {
+          if (state.lastAgentMessage == null) await finalMessage(rpc, state, controller.signal);
+          break;
+        }
+        if (rpc.socket.readyState !== WebSocket.OPEN) throw new Error('Wait socket closed');
+        await waitUntil(nextSnapshot);
       } catch (error) {
         if (controller.signal.aborted || error.rpcError || rpc?.socket.readyState === WebSocket.OPEN) throw error;
         await rpc?.close(); rpc = null; if (++failures > 15) throw error;
