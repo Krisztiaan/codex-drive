@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Ajv from 'ajv';
 import { fixture, until } from '../test-support/app-server.mjs';
+import { Rpc } from '../src/rpc.mjs';
+import { Store } from '../src/state.mjs';
+import { waitForTurn } from '../src/turns.mjs';
 
 const schema = JSON.parse(readFileSync(new URL('../protocol/schema.json', import.meta.url)));
 const ajv = new Ajv({ strict: false, validateFormats: false });
@@ -125,16 +128,31 @@ test('wait retains a completion across reconnect when the resumed snapshot loses
   } });
   const turn = f.turns[0]; turn.status = 'inProgress'; turn.items = []; turn.itemsView = 'notLoaded';
   f.seed({ status: 'running' });
-  const waiter = f.launch(['wait', 'demo', '--timeout', '3']);
-  await until(() => release, 'in-flight snapshot before disconnect');
-  const failure = error('serverOverloaded'); f.complete('failed', null, turn, failure);
-  await until(() => readdirSync(join(f.home, 'calls')).some(file =>
-    readFileSync(join(f.home, 'calls', file), 'utf8').trim().split('\n').map(JSON.parse).some(e => e.method === 'turn/completed')), 'wait journaled completion');
-  f.disconnect(); release();
-  const result = await waiter.result;
-  assert.equal(result.code, 75, result.stdout + result.stderr);
-  assert.equal(JSON.parse(result.stdout).failure.class, 'capacity');
-  assert.ok(f.received.filter(m => m.method === 'thread/resume').length >= 2, 'wait must reconnect');
+  // Observe actual event delivery instead of using the removed call journal as
+  // a synchronization side channel while a snapshot is still in flight.
+  let observed = false, result;
+  const emit = Rpc.prototype.emit;
+  t.mock.method(Rpc.prototype, 'emit', function (name, ...args) {
+    const value = emit.call(this, name, ...args);
+    if (name === 'event' && args[0]?.method === 'turn/completed') observed = true;
+    return value;
+  });
+  const previous = process.env.CODEX_DRIVE_HOME; process.env.CODEX_DRIVE_HOME = f.home;
+  const controller = new AbortController();
+  const waiter = waitForTurn(new Store(f.home), { timeout: '3' }, 'demo', value => { result = value; }, controller.signal);
+  waiter.catch(() => {});
+  try {
+    await until(() => release, 'in-flight snapshot before disconnect');
+    const failure = error('serverOverloaded'); f.complete('failed', null, turn, failure);
+    await until(() => observed, 'wait received completion');
+    f.disconnect(); release();
+    assert.equal(await waiter, 75);
+    assert.equal(result.failure.class, 'capacity');
+    assert.ok(f.received.filter(m => m.method === 'thread/resume').length >= 2, 'wait must reconnect');
+  } finally {
+    controller.abort(new Error('Test finished')); await waiter.catch(() => {});
+    if (previous === undefined) delete process.env.CODEX_DRIVE_HOME; else process.env.CODEX_DRIVE_HOME = previous;
+  }
 });
 
 test('late wait uses a detached logger completion when the server snapshot loses its failure', async t => {
