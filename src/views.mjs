@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, lstatSync, statSync, realpathSync, readdirSync } from 'node:fs';
 import { join, resolve, sep, dirname } from 'node:path';
 import { checkKey } from './state.mjs';
 import { quotas } from './account.mjs';
@@ -36,6 +36,39 @@ export function recordSteer(store, state, text, turnId) {
 export function pruneCandidates(store, olderThan) {
   const cutoff = Date.now() - duration(olderThan ?? '30d');
   return store.all().filter(s => ['completed', 'failed', 'interrupted', 'idle'].includes(s.status) && Date.parse(s.lastEventTime) < cutoff && !existsSync(store.path(s.name ?? s.threadId) + '.lock'));
+}
+export function pruneCalls(store, olderThan, apply = false) {
+  const age = olderThan ?? '30d';
+  const cutoff = Date.now() - duration(/^\d+(?:\.\d+)?$/.test(age) ? age + 'd' : age);
+  const dir = join(realpathSync(store.home), 'calls');
+  let directory;
+  try { directory = lstatSync(dir); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  if (!directory.isDirectory()) throw new Error('Refusing prune: calls must be a real directory');
+  const sameDirectory = stat => stat.isDirectory() && stat.dev === directory.dev && stat.ino === directory.ino;
+  const previous = process.cwd();
+  try {
+    // Pin the directory as cwd for this synchronous operation: relative lstat and
+    // unlink cannot follow a replacement calls/ symlink. Node has no unlinkat.
+    process.chdir(dir);
+    const checkDirectory = () => {
+      if (!sameDirectory(statSync('.')) || !sameDirectory(lstatSync(dir)) || realpathSync('.') !== dir) {
+        throw new Error('Refusing prune: calls directory changed');
+      }
+    };
+    checkDirectory();
+    const calls = [];
+    for (const name of readdirSync('.').filter(name => name.endsWith('.jsonl')).sort()) {
+      checkDirectory();
+      try {
+        const stat = lstatSync(name);
+        if (!stat.isFile() || stat.mtimeMs >= cutoff) continue;
+        if (apply) unlinkSync(name); // Unlinks the entry itself, never a link target.
+        calls.push(name);
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return calls;
+  } finally { process.chdir(previous); }
 }
 export function removeSession(store, state) {
   const all = store.all();

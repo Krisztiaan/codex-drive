@@ -8,10 +8,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 function frame(message) {
   const body = Buffer.from(JSON.stringify(message));
-  const header = body.length < 126 ? Buffer.from([0x81, body.length]) : Buffer.from([0x81, 126, body.length >> 8, body.length & 255]);
+  const header = body.length < 126 ? Buffer.from([0x81, body.length]) : body.length <= 65535 ? Buffer.from([0x81, 126, body.length >> 8, body.length & 255]) : Buffer.alloc(10);
+  if (body.length > 65535) { header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(body.length), 2); }
   return Buffer.concat([header, body]);
 }
-export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, resumeEvents = [], threadStatus, threadFlags = [] } = {}) {
+export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, initializeEvents = [], resumeEvents = [], threadStatus, threadFlags = [] } = {}) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
@@ -72,7 +73,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
         if (paused.has(method)) continue;
         let result;
         switch (method) {
-          case 'initialize': socket.optOut = params.capabilities?.optOutNotificationMethods; result = {}; break;
+          case 'initialize': socket.optOut = params.capabilities?.optOutNotificationMethods; for (const event of initializeEvents) if (!socket.optOut?.includes(event.method)) socket.write(frame(event)); result = {}; break;
           case 'server/diagnostics': result = diagnostics ? diagnostics() : { diagnostics: ['PASSTHROUGH'] }; break;
           case 'thread/read': {
             if (params.threadId === 'missing') { socket.write(frame({ id, error: { code: -32001, message: 'Not found', data: { detail: 'original' } } })); continue; }

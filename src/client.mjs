@@ -1,21 +1,21 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { dirname } from 'node:path';
 import { Rpc } from './rpc.mjs';
 import { RequestBroker } from './requests.mjs';
 import { stateHome } from './state.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
-// Pure observers use completed items, never streaming text fragments.
+// Pure observers use completed items, never streaming text fragments or diffs.
 export const WAIT_NOTIFICATION_OPT_OUTS = Object.freeze([
   'item/agentMessage/delta', 'item/commandExecution/outputDelta',
   'item/fileChange/outputDelta', 'item/plan/delta',
   'item/reasoning/summaryTextDelta', 'item/reasoning/textDelta',
+  'turn/diff/updated',
 ]);
 
 export function lifecycleEvent(event) {
-  return event.method?.startsWith('turn/') || event.method?.startsWith('driver/') ||
-    ['error', 'warning', 'account/rateLimits/updated', 'thread/status/changed'].includes(event.method) ||
+  return event.method?.startsWith('driver/') ||
+    ['turn/started', 'turn/completed', 'error', 'warning', 'account/rateLimits/updated', 'thread/status/changed'].includes(event.method) ||
     event.method === 'item/completed' && event.params?.item?.type === 'agentMessage';
 }
 export function journal(path, { buffered = false, onError } = {}) {
@@ -33,7 +33,9 @@ export function journal(path, { buffered = false, onError } = {}) {
   log.flush = flush;
   return log;
 }
-export async function connection(port, signal, { log = journal(join(stateHome(), 'calls', randomUUID() + '.jsonl')), policy = DEFAULT_PERMISSIONS.requestPolicy, threadId, initializeParams, observer = false } = {}) {
+// Callers needing durable events supply a logger. Pending requests have their own
+// broker records; ordinary connections do not need a second raw event journal.
+export async function connection(port, signal, { log = () => {}, policy = DEFAULT_PERMISSIONS.requestPolicy, threadId, initializeParams, observer = false } = {}) {
   const rpc = new Rpc(port);
   const brokerLog = event => { log(event); if (event.method === 'driver/requestPending') console.error(JSON.stringify(event)); };
   const broker = new RequestBroker({ home: stateHome(), log: brokerLog, policy, threadId });

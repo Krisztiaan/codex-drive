@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, mkdirSync, readFileSync, existsSync, openSync, closeSync, fstatSync, readSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, existsSync, openSync, closeSync, fstatSync, readSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { dirname, join } from 'node:path';
 import { setMaxListeners } from 'node:events';
@@ -13,7 +13,7 @@ import { methods, methodSchema, validateCall } from './protocol.mjs';
 import { readJson, callParams, textInput, turnParams } from './params.mjs';
 import { connection } from './client.mjs';
 import { accountHealth, usageText } from './account.mjs';
-import { filterStates, table, recordSteer, pruneCandidates, removeSession, duration } from './views.mjs';
+import { filterStates, table, recordSteer, pruneCandidates, pruneCalls, removeSession } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 import { pendingRequests, respond } from './requests.mjs';
 import { findState, portFor, snapshot, statusView, runAttached, waitForTurn, warning, effectiveState, attachedDefaults } from './turns.mjs';
@@ -167,11 +167,7 @@ async function main() {
   }
   if (command === 'prune') {
     if (options.calls) {
-      const age = options['older-than'] ?? '30d';
-      const cutoff = Date.now() - duration(/^\d+(?:\.\d+)?$/.test(age) ? age + 'd' : age);
-      const dir = join(store.home, 'calls');
-      const calls = existsSync(dir) ? readdirSync(dir).filter(name => name.endsWith('.jsonl') && statSync(join(dir, name)).isFile() && statSync(join(dir, name)).mtimeMs < cutoff) : [];
-      if (options.apply) for (const name of calls) unlinkSync(join(dir, name));
+      const calls = pruneCalls(store, options['older-than'], options.apply);
       print({ dryRun: !options.apply, calls }); return;
     }
     const removed = [];
