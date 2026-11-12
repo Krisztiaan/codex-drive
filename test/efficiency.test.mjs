@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { resolve, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { fixture, until } from '../test-support/app-server.mjs';
+
+const sourceModule = name => import(pathToFileURL(join(process.env.CODEX_DRIVE_TEST_SOURCE ?? resolve('src'), name)).href);
 
 test('internal resumes exclude history while explicit overrides and raw calls win', async t => {
   const f = await fixture(t);
@@ -15,7 +19,7 @@ test('internal resumes exclude history while explicit overrides and raw calls wi
 
 test('snapshots page older targets without hydration and fetch commentary only for that target', async t => {
   const f = await fixture(t);
-  const { snapshot } = await import('../src/turns.mjs');
+  const { snapshot } = await sourceModule('turns.mjs');
   const { Rpc } = await import('../src/rpc.mjs');
   f.turns[0].status = 'failed';
   f.turns[0].error = { message: 'failure' };
@@ -105,9 +109,9 @@ test('logger buffers noisy journal writes and flushes lifecycle records', async 
 });
 
 test('serve inspection uses metadata and treats approval waiting as active', async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, { threadFlags: ['waitingOnApproval'] });
   f.turns[0].status = 'inProgress';
-  const { activeTurns } = await import('../src/server.mjs');
+  const { activeTurns } = await sourceModule('server.mjs');
   const previous = process.env.CODEX_DRIVE_HOME; process.env.CODEX_DRIVE_HOME = f.home;
   try {
     assert.deepEqual(await activeTurns(f.port), ['demo']);
@@ -146,7 +150,7 @@ test('--any all-error exits nonzero', async t => {
 test('open-socket RPC timeout is retried by wait without replaying mutations', async t => {
   let reads = 0;
   const f = await fixture(t, { turnsList: (params, result) => ++reads === 1 ? new Promise(() => {}) : result });
-  const { waitForTurn } = await import('../src/turns.mjs');
+  const { waitForTurn } = await sourceModule('turns.mjs');
   const { Store } = await import('../src/state.mjs');
   const actual = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => actual(fn, ms === 30000 ? 20 : ms, ...args));
@@ -157,4 +161,71 @@ test('open-socket RPC timeout is retried by wait without replaying mutations', a
     assert.equal(f.received.filter(m => m.method === 'thread/resume').length, 2);
     assert.equal(f.received.filter(m => m.method === 'turn/start').length, 0);
   } finally { if (previous === undefined) delete process.env.CODEX_DRIVE_HOME; else process.env.CODEX_DRIVE_HOME = previous; }
+});
+
+test('continuous notifications cannot postpone reconciliation snapshots', async t => {
+  const f = await fixture(t);
+  f.turns[0].status = 'inProgress'; f.turns[0].items = [];
+  f.seed({ status: 'running', lastAgentMessage: null });
+  const task = f.launch(['wait', 'demo', '--timeout', '8']);
+  await until(f.hasRead);
+  const timer = setInterval(() => f.emit('warning', { threadId: 'thread-1' }), 20);
+  try {
+    await until(() => f.received.filter(m => m.method === 'thread/turns/list').length >= 3);
+    f.complete('completed', 'TRAFFIC');
+    assert.equal((await task.result).code, 0);
+  } finally { clearInterval(timer); }
+});
+
+test('warm resume rate-limit replay survives history exclusion', async t => {
+  const rateLimits = { limitId: 'codex', primary: { usedPercent: 45, resetsAt: 1234, windowDurationMins: 60 } };
+  const f = await fixture(t, { resumeEvents: [{ method: 'account/rateLimits/updated', params: { rateLimits } }] });
+  const result = await f.command(['wait', 'demo']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).rateLimits.primary.usedPercent, 45);
+  assert.equal(f.received.find(m => m.method === 'thread/resume').params.excludeTurns, true);
+});
+
+test('unknown loaded thread status blocks server inspection', async t => {
+  const f = await fixture(t, { threadStatus: 'notLoaded' });
+  const { activeTurns } = await sourceModule('server.mjs');
+  const previous = process.env.CODEX_DRIVE_HOME; process.env.CODEX_DRIVE_HOME = f.home;
+  try { await assert.rejects(activeTurns(f.port), /Unknown or unreadable/); }
+  finally { if (previous === undefined) delete process.env.CODEX_DRIVE_HOME; else process.env.CODEX_DRIVE_HOME = previous; }
+});
+
+test('logger recovery retains an explicit resume history override', async t => {
+  const f = await fixture(t);
+  f.turns[0].status = 'inProgress'; f.turns[0].items = [];
+  f.seed({ status: 'running', lastAgentMessage: null });
+  const task = f.launch(['resume', 'demo', '--thread-params', '{"excludeTurns":false}']);
+  await until(() => task.stdout().trim());
+  f.disconnect();
+  await until(() => f.received.filter(m => m.method === 'thread/resume').length >= 2);
+  f.complete('completed', 'RECOVERY');
+  const result = await task.result;
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(f.received.filter(m => m.method === 'thread/resume').every(m => m.params.excludeTurns === false));
+});
+
+test('noisy logger events coalesce state writes and flush at completion', async t => {
+  const f = await fixture(t);
+  f.turns[0].status = 'inProgress'; f.turns[0].items = [];
+  f.seed({ status: 'running', lastAgentMessage: null });
+  const { Store } = await import('../src/state.mjs');
+  const { runAttached } = await sourceModule('turns.mjs');
+  const store = new Store(f.home), save = store.save.bind(store);
+  let saves = 0, ready;
+  store.save = state => { saves++; return save(state); };
+  const attached = new Promise(resolve => { ready = resolve; });
+  const task = runAttached(store, 'adopt', {}, 'demo', undefined, ready);
+  await attached;
+  const before = saves;
+  for (let n = 0; n < 100; n++) f.emit('item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', delta: 'x' });
+  const { setTimeout: delay } = await import('node:timers/promises');
+  await delay(100);
+  assert.ok(saves <= before + 1, String(saves - before));
+  f.complete('completed', 'FLUSHED');
+  await task;
+  assert.equal(store.read('demo').lastAgentMessage, 'FLUSHED');
 });
