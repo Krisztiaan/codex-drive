@@ -75,3 +75,31 @@ test('only wait observers opt out of unused streaming notifications', async t =>
   await f.command(['adopt', 'demo']);
   assert.equal(f.received.slice(before).find(m => m.method === 'initialize').params.capabilities.optOutNotificationMethods, undefined);
 });
+
+test('calls pruning is explicit, age-filtered and dry-run by default', async t => {
+  const f = await fixture(t);
+  const { mkdirSync, writeFileSync, utimesSync, existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const dir = join(f.home, 'calls'); mkdirSync(dir);
+  const old = join(dir, 'old.jsonl'), fresh = join(dir, 'fresh.jsonl');
+  writeFileSync(old, '{}\n'); writeFileSync(fresh, '{}\n');
+  utimesSync(old, new Date(0), new Date(0));
+  const dry = await f.command(['prune', '--calls', '--older-than', '2']);
+  assert.deepEqual(JSON.parse(dry.stdout).calls, ['old.jsonl']);
+  assert.ok(existsSync(old));
+  const applied = await f.command(['prune', '--calls', '--older-than', '2', '--apply']);
+  assert.equal(applied.code, 0, applied.stderr);
+  assert.equal(existsSync(old), false); assert.ok(existsSync(fresh));
+});
+
+test('logger buffers noisy journal writes and flushes lifecycle records', async t => {
+  const f = await fixture(t);
+  const { journal } = await import('../src/client.mjs');
+  const { readFileSync, existsSync } = await import('node:fs');
+  const log = journal(f.state.logPath, { buffered: true });
+  log({ method: 'item/agentMessage/delta', params: { delta: 'hé' } });
+  assert.equal(existsSync(f.state.logPath), false);
+  log({ method: 'turn/completed', params: {} });
+  assert.equal(readFileSync(f.state.logPath, 'utf8').trim().split('\n').length, 2);
+  log.flush();
+});

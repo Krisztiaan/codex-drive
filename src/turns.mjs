@@ -7,7 +7,7 @@ import { RequestBroker, pendingRequests } from './requests.mjs';
 import { textInput, turnParams } from './params.mjs';
 import { validateCall } from './protocol.mjs';
 import { exitCode, failureDetails } from './failures.mjs';
-import { connection, journal } from './client.mjs';
+import { connection, journal, lifecycleEvent } from './client.mjs';
 import { accountHealth } from './account.mjs';
 import { steersFor } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
@@ -102,7 +102,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   };
   const onInt = () => onSignal('SIGINT'), onTerm = () => onSignal('SIGTERM');
   const logPath = options.log ?? state?.logPath ?? join(store.home, 'logs', randomUUID() + '.jsonl');
-  const log = journal(logPath), buffered = [];
+  const log = journal(logPath, { buffered: true, onError: error => rejectDone(error) }), buffered = [];
   const brokerLog = event => { log(event); if (event.method === 'driver/requestPending') console.error(JSON.stringify(event)); };
   const broker = new RequestBroker({ home: store.home, log: brokerLog, policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId ?? (command === 'start' ? undefined : key) });
   let unlock = options.name || state ? store.lock(state?.name ?? options.name ?? key) : () => {};
@@ -113,11 +113,17 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   const newDone = () => { const promise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; }); promise.catch(() => {}); return promise; };
   let done = newDone();
   process.once('SIGINT', onInt); process.once('SIGTERM', onTerm);
+  let saveTimer, dirty = false;
+  function flushState() { clearTimeout(saveTimer); saveTimer = null; if (dirty && state) { store.save(state); dirty = false; } }
   function reduce(event) {
     if (!ready) { buffered.push(event); return; }
     const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
     if (ownedTurnId && eventTurnId && eventTurnId !== ownedTurnId) return;
-    if (applyEvent(state, event)) store.save(state);
+    if (applyEvent(state, event)) {
+      dirty = true;
+      if (lifecycleEvent(event)) flushState();
+      else saveTimer ??= setTimeout(() => { try { flushState(); } catch (error) { rejectDone(error); } }, 1000).unref();
+    }
     if (terminal(state.status)) resolveDone();
   }
   function wire(client) {
@@ -244,7 +250,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     releaseServer?.();
     shuttingDown = true;
     await broker.close(); rpc?.close(); await recoveryTask; rpc?.close();
-    process.off('SIGINT', onInt); process.off('SIGTERM', onTerm); unlock();
+    try { flushState(); log.flush(); } finally { process.off('SIGINT', onInt); process.off('SIGTERM', onTerm); unlock(); }
   }
 }
 export async function waitForTurn(store, options, key, report = value => console.log(JSON.stringify(value)), externalSignal) {

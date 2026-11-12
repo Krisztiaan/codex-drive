@@ -6,15 +6,32 @@ import { RequestBroker } from './requests.mjs';
 import { stateHome } from './state.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
+// Pure observers use completed items, never streaming text fragments.
 export const WAIT_NOTIFICATION_OPT_OUTS = Object.freeze([
   'item/agentMessage/delta', 'item/commandExecution/outputDelta',
   'item/fileChange/outputDelta', 'item/plan/delta',
   'item/reasoning/summaryTextDelta', 'item/reasoning/textDelta',
 ]);
 
-export function journal(path) {
+export function lifecycleEvent(event) {
+  return event.method?.startsWith('turn/') || event.method?.startsWith('driver/') ||
+    ['error', 'warning', 'account/rateLimits/updated', 'thread/status/changed'].includes(event.method) ||
+    event.method === 'item/completed' && event.params?.item?.type === 'agentMessage';
+}
+export function journal(path, { buffered = false, onError } = {}) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  return event => appendFileSync(path, JSON.stringify({ receivedAt: new Date().toISOString(), ...event }) + '\n', { mode: 0o600 });
+  let lines = '', timer;
+  const flush = () => {
+    clearTimeout(timer); timer = null;
+    if (lines) { appendFileSync(path, lines, { mode: 0o600 }); lines = ''; }
+  };
+  const log = event => {
+    lines += JSON.stringify({ receivedAt: new Date().toISOString(), ...event }) + '\n';
+    if (!buffered || lifecycleEvent(event)) flush();
+    else timer ??= setTimeout(() => { try { flush(); } catch (error) { if (onError) onError(error); else throw error; } }, 1000).unref();
+  };
+  log.flush = flush;
+  return log;
 }
 export async function connection(port, signal, { log = journal(join(stateHome(), 'calls', randomUUID() + '.jsonl')), policy = DEFAULT_PERMISSIONS.requestPolicy, threadId, initializeParams, observer = false } = {}) {
   const rpc = new Rpc(port);
@@ -24,7 +41,7 @@ export async function connection(port, signal, { log = journal(join(stateHome(),
   const closeSocket = rpc.close.bind(rpc);
   rpc.close = () => broker.close().finally(closeSocket);
   rpc.on('event', event => {
-    try { log(event); broker.handle(rpc, event); }
+    try { if (!observer || lifecycleEvent(event) || event.id !== undefined) log(event); broker.handle(rpc, event); }
     catch (error) { rpc.emit('protocolError', error); closeSocket(); }
   });
   if (observer && !initializeParams) initializeParams = {
