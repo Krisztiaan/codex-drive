@@ -27,17 +27,34 @@ export function statusView(store, state) {
 export async function snapshot(rpc, state, signal, targetTurnId) {
   let cursor, turn;
   do {
-    const page = await rpc.request('thread/turns/list', { threadId: state.threadId, limit: targetTurnId ? 20 : 1, sortDirection: 'desc', itemsView: 'full', ...(cursor ? { cursor } : {}) }, { signal });
+    const page = await rpc.request('thread/turns/list', { threadId: state.threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) }, { signal });
     turn = targetTurnId ? page.data.find(turn => turn.id === targetTurnId) : page.data[0]; cursor = page.nextCursor;
   } while (!turn && cursor);
   if (!turn) {
     if (targetTurnId) throw new Error(`Turn ${targetTurnId} is unavailable`);
     state.turnId = null; state.status = 'idle'; state.error = null; state.lastAgentMessage = null; state.failure = null; return;
   }
+  if (state.turnId !== turn.id || turn.status === 'inProgress' && terminal(state.status)) state.lastAgentMessage = null;
   state.turnId = turn.id; state.status = turn.status === 'inProgress' ? 'running' : turn.status; state.error = turn.error;
-  const message = turn.items.filter(item => item.type === 'agentMessage' && item.text.trim()).at(-1);
-  state.lastAgentMessage = message ? message.text.trim().split('\n').filter(Boolean).at(-1) ?? null : null;
+  if (terminal(state.status) && state.lastAgentMessage == null) await finalMessage(rpc, state, signal);
   state.failure = state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null;
+}
+// Items are fetched only for a settled target lacking an event-captured message.
+// Summary turns can omit commentary, including the last message before failure.
+const messageReads = new WeakMap();
+async function finalMessage(rpc, state, signal) {
+  let read = messageReads.get(rpc);
+  if (!read) messageReads.set(rpc, read = new Set());
+  const key = state.threadId + ':' + state.turnId;
+  if (read.has(key)) return;
+  let cursor;
+  do {
+    const page = await rpc.request('thread/items/list', { threadId: state.threadId, turnId: state.turnId, sortDirection: 'desc', limit: 1, ...(cursor ? { cursor } : {}) }, { signal });
+    const item = page.data.find(entry => entry.item.type === 'agentMessage' && entry.item.text.trim())?.item;
+    if (item) { applyEvent(state, { method: 'item/completed', params: { threadId: state.threadId, turnId: state.turnId, item } }); break; }
+    cursor = page.nextCursor;
+  } while (cursor);
+  read.add(key);
 }
 export function warning(state) {
   if (state.sandbox === 'danger-full-access' || state.sandboxPolicy?.type === 'dangerFullAccess') console.error(`WARNING: danger-full-access; approval=${typeof state.approval === 'string' ? state.approval : JSON.stringify(state.approvalPolicy)}. Codex can modify files and run commands without sandbox protection.`);
@@ -232,6 +249,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
 }
 export async function waitForTurn(store, options, key, report = value => console.log(JSON.stringify(value)), externalSignal) {
   const state = store.read(key); portFor(options, state);
+  state.lastAgentMessage = null;
   const completions = new Map();
   const rememberFailure = known => {
     if (known.turnId && known.status === 'failed' && !completions.has(known.turnId)) {

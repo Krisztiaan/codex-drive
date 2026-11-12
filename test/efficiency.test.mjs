@@ -12,3 +12,24 @@ test('internal resumes exclude history while explicit overrides and raw calls wi
     assert.equal(params.excludeTurns, args[0] === 'call' ? undefined : args.includes('--thread-params') ? false : true);
   }
 });
+
+test('snapshots page older targets without hydration and fetch commentary only for that target', async t => {
+  const f = await fixture(t);
+  const { snapshot } = await import('../src/turns.mjs');
+  const { Rpc } = await import('../src/rpc.mjs');
+  f.turns[0].status = 'failed';
+  f.turns[0].error = { message: 'failure' };
+  f.turns[0].items[0].phase = 'commentary';
+  f.turns.push({ id: 'newer', status: 'inProgress', items: [], error: null });
+  const rpc = new Rpc(f.port); await rpc.connect();
+  try {
+    const state = { threadId: 'thread-1' };
+    await snapshot(rpc, state, undefined, 'turn-1');
+    await snapshot(rpc, state, undefined, 'turn-1');
+    assert.equal(state.lastAgentMessage, 'PREVIOUS');
+    assert.equal(state.error.message, 'failure');
+    assert.ok(f.received.filter(m => m.method === 'thread/turns/list').every(m => m.params.itemsView === 'notLoaded' && m.params.limit === 1));
+    const items = f.received.filter(m => m.method === 'thread/items/list');
+    assert.equal(items.length, 1); assert.equal(items[0].params.turnId, 'turn-1');
+  } finally { rpc.close(); }
+});

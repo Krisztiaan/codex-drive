@@ -29,7 +29,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   const persist = () => { if (historyFile) writeFileSync(historyFile, JSON.stringify([...threads])); };
   let nextFork = 1;
   const server = createServer();
-  function emit(method, params) { for (const socket of sockets) if (socket.subscribed) socket.write(frame({ method, params })); }
+  function emit(method, params) { for (const socket of sockets) if (socket.subscribed && !socket.optOut?.includes(method)) socket.write(frame({ method, params })); }
   function complete(status = 'completed', text = 'CURRENT', turn = turns.at(-1), error = null) {
     const owner = [...threads].find(([, history]) => history.includes(turn))?.[0] ?? threadId;
     if (text) {
@@ -50,7 +50,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
       while (buffered.length >= 2) {
         const opcode = buffered[0] & 15; let length = buffered[1] & 127, offset = 2;
         if (length === 126) { if (buffered.length < 4) return; length = buffered.readUInt16BE(2); offset = 4; }
-        if (length === 127) { if (buffered.length < 10) return; length = Number(buffered.readBigUInt64BE(2)); offset = 10; }
+        else if (length === 127) { if (buffered.length < 10) return; length = Number(buffered.readBigUInt64BE(2)); offset = 10; }
         const masked = Boolean(buffered[1] & 128), maskOffset = offset;
         if (masked) offset += 4;
         if (buffered.length < offset + length) return;
@@ -67,14 +67,14 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
         if (paused.has(method)) continue;
         let result;
         switch (method) {
-          case 'initialize': result = {}; break;
+          case 'initialize': socket.optOut = params.capabilities?.optOutNotificationMethods; result = {}; break;
           case 'server/diagnostics': result = diagnostics ? diagnostics() : { diagnostics: ['PASSTHROUGH'] }; break;
           case 'thread/read': {
             if (params.threadId === 'missing') { socket.write(frame({ id, error: { code: -32001, message: 'Not found', data: { detail: 'original' } } })); continue; }
-            result = { thread: { id: params.threadId, cwd: home, turns: threads.get(params.threadId) ?? turns } }; break;
+            result = { thread: { id: params.threadId, cwd: home, status: { type: (threads.get(params.threadId) ?? turns).some(t => t.status === 'inProgress') ? 'active' : 'idle' }, turns: params.includeTurns || method === 'thread/resume' && !params.excludeTurns ? threads.get(params.threadId) ?? turns : [] } }; break;
           }
           case 'thread/start': socket.subscribed = true; result = { thread: { id: threadId, cwd: home }, model: params.model }; break;
-          case 'thread/resume': socket.subscribed = true; result = { thread: { id: params.threadId, cwd: home, turns: threads.get(params.threadId) ?? turns } }; break;
+          case 'thread/resume': socket.subscribed = true; result = { thread: { id: params.threadId, cwd: home, status: { type: (threads.get(params.threadId) ?? turns).some(t => t.status === 'inProgress') ? 'active' : 'idle' }, turns: params.includeTurns || method === 'thread/resume' && !params.excludeTurns ? threads.get(params.threadId) ?? turns : [] } }; break;
           case 'thread/fork': { const id = `fork-${nextFork++}`; const history = structuredClone(threads.get(params.threadId) ?? turns); threads.set(id, history); result = { thread: { id, cwd: home, turns: history } }; break; }
           case 'model/list': result = { data: [], nextCursor: null }; break;
           case 'account/read': result = typeof account === 'function' ? account() : account ?? { account: null, requiresOpenaiAuth: false }; break;
@@ -86,12 +86,19 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
             reads++;
             if (!(threads.get(params.threadId) ?? turns).length) { socket.write(frame({ id, error: { code: -32600, message: 'Thread not materialized before first user message' } })); continue; }
             const data = [...(threads.get(params.threadId) ?? turns)].reverse(), offset = Number(params.cursor ?? 0), end = offset + (params.limit ?? data.length);
-            result = { data: data.slice(offset, end), nextCursor: end < data.length ? String(end) : null };
+            result = { data: data.slice(offset, end).map(turn => ({ ...turn, items: params.itemsView === 'notLoaded' ? [] : params.itemsView === 'summary' ? turn.items.filter(item => item.phase !== 'commentary') : turn.items })), nextCursor: end < data.length ? String(end) : null };
             if (turnsList) {
               Promise.resolve(turnsList(params, structuredClone(result))).then(result => socket.write(frame({ id, result })));
               continue;
             }
             break;
+          }
+          case 'thread/items/list': {
+            const history = threads.get(params.threadId) ?? turns;
+            let data = history.filter(t => !params.turnId || t.id === params.turnId).flatMap(t => t.items.map(item => ({ turnId: t.id, item })));
+            if (params.sortDirection === 'desc') data.reverse();
+            const offset = Number(params.cursor ?? 0), end = offset + (params.limit ?? data.length);
+            result = { data: data.slice(offset, end), nextCursor: end < data.length ? String(end) : null }; break;
           }
           case 'turn/start': {
             const turn = { id: `turn-${nextTurn++}`, status: 'inProgress', items: [], error: null };
