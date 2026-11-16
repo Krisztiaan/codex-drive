@@ -132,6 +132,25 @@ Classification uses only `codexErrorInfo`, never error prose. Other structured v
 
 Timeout accepts positive fractional seconds and covers connections/RPCs. It leaves the turn running. Without a timeout there is no overall deadline; transport recovery is bounded to 15 attempts. Wait is read-only with respect to the thread state file. Status/wait cannot recreate notification history missed while no logger was attached.
 
+## Results and the completion inbox
+
+`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest settled turn, or of `--turn`. A newer running turn does not hide the last settled one; the header names the turn. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). It reads the session's own log only when the server is unreachable or answers that it does not know the thread (`thread not found` or `no rollout found for thread id`); every other server error is reported. Log replay includes the logger's reconnect and recovery records, which carry the status, error, full final message and completion time found by the recovery snapshot. `--json` reports `source: "server"` or `"log"`. As in `wait`, a failure the logger saved for the same turn wins over a history snapshot that lost its error. A failed or interrupted turn still prints the message that exists.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Completed |
+| 1 | Failed or interrupted (the message that exists is printed), or a command error |
+| 2 | Unknown name, thread ID or turn |
+| 3 | Not finished: the requested turn is still running, or no turn has settled yet |
+
+Each settled turn gets one entry in the completion outbox, `CODEX_DRIVE_HOME/outbox/` (default `~/.codex-drive/outbox/`): a small JSON file named `<threadId>-<turnId>.json` with `name`, `threadId`, `turnId`, `cwd`, `status` (`completed`, `failed`, `interrupted`), `failure` (`capacity`, `usageLimit`, `other` or null), `exitCode` (the `wait` contract) and `finishedAt`. It holds no message text, errors or prompts; read content with `result`. `finishedAt` is the server's completion time when known (from the turn, the recovery snapshot or the journal), otherwise the time of recording.
+
+The logger (attached or `--detach`) records each turn it saw running when it settles, so entries appear with no `wait` running. `wait` and `result` record the terminal turn they observe too, which repairs the entry of a logger that died; until one of them runs, a follower does not learn of a turn whose logger died. Recording is idempotent: each entry is written to a temporary file and published with a hard link, which never replaces an existing entry, so racing recorders leave exactly one file and a crash never leaves a partial entry. A failed recording is reported to the session log (or stderr for `wait` and `result`) through a sink that never throws, so it cannot change a command's exit code.
+
+Each recording prunes entries older than 14 days or beyond the newest 2,000 turns by `finishedAt`, with their acknowledgement markers; a repair for a turn already past the age is skipped. Temporary files and orphan markers are removed once they are an hour old. Both limits are adjustable: `CODEX_DRIVE_OUTBOX_MAX_AGE` (a duration such as `30d`) and `CODEX_DRIVE_OUTBOX_MAX_ENTRIES`.
+
+`inbox` prints the entries ordered by `finishedAt`, one JSON line each. `--since 24h` (or an ISO time) limits by `finishedAt`; `--unread` skips acknowledged entries; `--ack` acknowledges what it prints by creating an empty `<threadId>-<turnId>.acked` marker beside it. `--follow` takes a baseline scan, starts watching the outbox directory (no polling), then rescans, so nothing published during startup is lost; every later change triggers a rescan, and each entry prints once. Combined with `--unread` or `--since` it prints the matching baseline too. Two followers can both print an entry before either acknowledges it.
+
 ## Orchestrator pattern
 
 ```sh
@@ -149,6 +168,18 @@ codex-drive resume alternative --detach "Try the alternate approach"
 ```
 
 Own the event follower's PID if you start it. Approval responses and steering may be issued concurrently with wait. Decide whether to resume, spend more after a usage limit, or report failure from the exit code and final JSON. `adopt` extends this pattern to existing histories; `call` reaches additional server/account/control APIs without another wrapper.
+
+## Integrating with Claude Code
+
+Start workers detached, follow the outbox from a background task or monitor, and read each result when its line arrives. Nothing depends on a `wait` staying alive, and a new session picks up what finished meanwhile with `inbox --unread`.
+
+```sh
+codex-drive start --cwd /path/to/project --name project-task --detach "Do the bounded work"
+codex-drive inbox --follow --unread --ack     # background task or monitor: one line per completion
+codex-drive result project-task               # on each line: full final message; exit 0/1/2/3
+```
+
+In a new or resumed session, run `codex-drive inbox --unread --ack` once to see completions that arrived while no follower ran, then `codex-drive status --active` for the workers still running.
 
 ## Server ownership and persistence
 

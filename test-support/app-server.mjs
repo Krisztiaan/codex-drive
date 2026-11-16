@@ -12,7 +12,7 @@ function frame(message) {
   if (body.length > 65535) { header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(body.length), 2); }
   return Buffer.concat([header, body]);
 }
-export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, initializeEvents = [], resumeEvents = [], threadStatus, threadFlags = [] } = {}) {
+export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, initializeEvents = [], resumeEvents = [], threadStatus, threadFlags = [], turnsListError } = {}) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
@@ -90,6 +90,8 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
           case 'thread/archive': case 'thread/unarchive': case 'thread/revert': case 'thread/compact/start': case 'thread/name/set': result = {}; break;
           case 'thread/turns/list': {
             reads++;
+            const listError = turnsListError?.(params);
+            if (listError) { socket.write(frame({ id, error: listError })); continue; }
             if (!(threads.get(params.threadId) ?? turns).length) { socket.write(frame({ id, error: { code: -32600, message: 'Thread not materialized before first user message' } })); continue; }
             const data = [...(threads.get(params.threadId) ?? turns)].reverse(), offset = Number(params.cursor ?? 0), end = offset + (params.limit ?? data.length);
             result = { data: data.slice(offset, end).map(turn => ({ ...turn, items: params.itemsView === 'notLoaded' ? [] : params.itemsView === 'summary' ? turn.items.filter(item => item.phase !== 'commentary') : turn.items })), nextCursor: end < data.length ? String(end) : null };
@@ -145,11 +147,16 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   t.after(async () => {
     for (const child of children) child.kill('SIGTERM');
     // Detached driver PID is an owned test resource, never selected by name.
+    const drivers = [];
     for (const file of readdirSync(join(home, 'threads')).filter(f => f.endsWith('.json'))) {
       const saved = JSON.parse(readFileSync(join(home, 'threads', file), 'utf8'));
       const lock = join(home, 'threads', file) + '.lock';
       if (saved.driverPid && existsSync(lock) && Number(readFileSync(lock, 'utf8')) === saved.driverPid) { try { process.kill(saved.driverPid, 'SIGTERM'); } catch (e) { if (e.code !== 'ESRCH') throw e; } }
+      if (saved.driverPid) drivers.push(saved.driverPid);
     }
+    // A detached logger that just settled may still be writing; let it exit before removing its home.
+    const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; throw e; } };
+    for (let n = 0; n < 100 && drivers.some(alive); n++) await delay(50);
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));
     rmSync(home, { recursive: true, force: true });

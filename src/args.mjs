@@ -7,11 +7,11 @@ const allowed = {
   serve: ['port', 'stop', 'restart', 'force', 'timeout'], start: [...turnOptions, 'name', 'log'], resume: [...turnOptions, 'name', 'log'],
   adopt: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'], attach: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'],
   fork: ['name', 'log', 'sandbox', 'approval', 'thread-params', 'request-policy'],
-  steer: ['turn'], interrupt: ['turn'], status: ['json', 'active', 'cwd', 'since', 'name'], wait: ['timeout', 'all', 'any'], tail: ['n'], events: ['follow'],
+  steer: ['turn'], interrupt: ['turn'], status: ['json', 'active', 'cwd', 'since', 'name'], result: ['turn', 'json'], inbox: ['follow', 'since', 'unread', 'ack'], wait: ['timeout', 'all', 'any'], tail: ['n'], events: ['follow'],
   pending: [], respond: ['error'], call: ['request-policy'], methods: [],
   list: [], read: [], archive: [], unarchive: [], rollback: [], compact: [], name: [], models: [], account: ['json'], 'rate-limits': ['json'], prune: ['older-than', 'apply', 'calls'],
 };
-const counts = { serve: [0], start: [0, 1], resume: [1, 2], adopt: [1], attach: [1], fork: [1], steer: [2], interrupt: [1], status: [0, 1], wait: [1], tail: [1], events: [1], pending: [0, 1], respond: [2], call: [1, 2], methods: [0], list: [0], read: [1], archive: [1], unarchive: [1], rollback: [1], compact: [1], name: [2], models: [0], account: [0], 'rate-limits': [0], prune: [0] };
+const counts = { serve: [0], start: [0, 1], resume: [1, 2], adopt: [1], attach: [1], fork: [1], steer: [2], interrupt: [1], status: [0, 1], result: [1], inbox: [0], wait: [1], tail: [1], events: [1], pending: [0, 1], respond: [2], call: [1, 2], methods: [0], list: [0], read: [1], archive: [1], unarchive: [1], rollback: [1], compact: [1], name: [2], models: [0], account: [0], 'rate-limits': [0], prune: [0] };
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
   if (!allowed[command]) throw new Error('Unknown command; use codex-drive --help');
