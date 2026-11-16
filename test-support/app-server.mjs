@@ -12,7 +12,7 @@ function frame(message) {
   if (body.length > 65535) { header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(body.length), 2); }
   return Buffer.concat([header, body]);
 }
-export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, initializeEvents = [], resumeEvents = [], threadStatus, threadFlags = [] } = {}) {
+export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, initializeEvents = [], resumeEvents = [], threadStatus, threadFlags = [], turnsListError } = {}) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
@@ -90,6 +90,8 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
           case 'thread/archive': case 'thread/unarchive': case 'thread/revert': case 'thread/compact/start': case 'thread/name/set': result = {}; break;
           case 'thread/turns/list': {
             reads++;
+            const listError = turnsListError?.(params);
+            if (listError) { socket.write(frame({ id, error: listError })); continue; }
             if (!(threads.get(params.threadId) ?? turns).length) { socket.write(frame({ id, error: { code: -32600, message: 'Thread not materialized before first user message' } })); continue; }
             const data = [...(threads.get(params.threadId) ?? turns)].reverse(), offset = Number(params.cursor ?? 0), end = offset + (params.limit ?? data.length);
             result = { data: data.slice(offset, end).map(turn => ({ ...turn, items: params.itemsView === 'notLoaded' ? [] : params.itemsView === 'summary' ? turn.items.filter(item => item.phase !== 'commentary') : turn.items })), nextCursor: end < data.length ? String(end) : null };

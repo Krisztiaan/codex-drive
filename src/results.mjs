@@ -24,35 +24,41 @@ async function serverTurn(rpc, threadId, target) {
   } while (cursor);
   return target ? null : newest; // No settled turn yet: report the running one (or none).
 }
-// Unavailable means no server or a server without this thread; any other error is reported as is.
+// The app-server's errors for a thread it does not know; every other RPC error is reported as is.
+const missingThread = error => /^(thread not found|no rollout found for thread id)\b/i.test(error.rpcError?.message ?? '');
+// Unavailable means no server or a server without this thread.
 async function fromServer(options, state, port) {
   let rpc;
   try { rpc = await connection(port); } catch (error) { return { unavailable: error }; }
   try {
     let turn;
     try { turn = reconcile(state, await serverTurn(rpc, state.threadId, options.turn)); }
-    catch (error) { if (error.rpcError) return { unavailable: error }; throw error; }
+    catch (error) { if (missingThread(error)) return { unavailable: error }; throw error; }
     if (!turn) return { result: options.turn ? null : view(state, null, null, 'server') };
     const message = turn.status === 'inProgress' ? null : (await agentMessage(rpc, state.threadId, turn.id))?.text ?? null;
-    return { result: view(state, turn, message, 'server'), turn };
+    return { result: view(state, turn, message, 'server'), turn, finishedAt: turn.completedAt ? turn.completedAt * 1000 : undefined };
   } finally { await rpc.close(); }
 }
 // A log-only session: the journal's own turn, agent-message and recovery records for this thread.
+// A recovery record carries what the reconnect snapshot found: status, error, full message and completion time.
 function fromLog(options, state) {
   const turns = new Map(), update = (id, values) => turns.set(id, { id, status: 'inProgress', error: null, message: null, ...turns.get(id), ...values });
   const contents = readFileSync(state.logPath, 'utf8');
   for (const line of contents.slice(0, contents.lastIndexOf('\n') + 1).split('\n').filter(Boolean)) {
-    const { method, params } = JSON.parse(line);
+    const { method, params, receivedAt } = JSON.parse(line);
     if (params?.threadId !== state.threadId) continue;
+    const at = completedAt => completedAt ? completedAt * 1000 : Date.parse(receivedAt) || undefined;
     if (method === 'turn/started') update(params.turn.id, {});
-    else if (method === 'turn/completed') update(params.turn.id, { status: params.turn.status, error: params.turn.error ?? null });
+    else if (method === 'turn/completed') update(params.turn.id, { status: params.turn.status, error: params.turn.error ?? null, finishedAt: at(params.turn.completedAt) });
     else if (method === 'item/completed' && params.item?.type === 'agentMessage' && params.item.text?.trim()) update(params.turnId, { message: params.item.text });
-    else if (['driver/reconnected', 'driver/startRecovered'].includes(method) && params.turnId && params.status !== 'running') update(params.turnId, { status: params.status });
+    else if (['driver/reconnected', 'driver/startRecovered'].includes(method) && params.turnId && params.status !== 'running') {
+      update(params.turnId, { status: params.status, error: params.error ?? null, finishedAt: at(params.completedAt), ...(params.message ? { message: params.message } : {}) });
+    }
   }
   const all = [...turns.values()];
   const turn = reconcile(state, options.turn ? turns.get(options.turn) : all.findLast(turn => turn.status !== 'inProgress') ?? all.at(-1));
   if (!turn) return { result: options.turn ? null : view(state, null, null, 'log') };
-  return { result: view(state, turn, turn.status === 'inProgress' ? null : turn.message ?? null, 'log'), turn };
+  return { result: view(state, turn, turn.status === 'inProgress' ? null : turn.message ?? null, 'log'), turn, finishedAt: turn.finishedAt };
 }
 export async function turnResult(store, options, key) {
   const state = findState(store, key);
@@ -64,9 +70,9 @@ export async function turnResult(store, options, key) {
     try { found = fromLog(options, state); }
     catch (error) { if (error.code === 'ENOENT') throw found.unavailable; throw error; }
   }
-  const { result, turn } = found;
+  const { result, turn, finishedAt } = found;
   if (!result) throw fail(`Unknown turn ${options.turn} for ${key}`, 2);
-  if (turn && result.status in exits) recordQuietly(store.home, { ...state, turnId: turn.id, status: result.status, error: turn.error });
+  if (turn && result.status in exits) recordQuietly(store.home, { ...state, turnId: turn.id, status: result.status, error: turn.error }, { finishedAt });
   return { result, exitCode: exits[result.status] ?? 3 };
 }
 export function resultText(result) {

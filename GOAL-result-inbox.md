@@ -38,21 +38,24 @@ behind this goal: ~/.local/state/janus/audit-2026-11-09/agent-tooling-research-2
 ## Outcome
 - `result <name|threadId> [--turn <id>] [--json]`: header `name status turnId [failure class]`, then the full final
   agent message of the latest settled turn or `--turn`. Reads the server; falls back to the session log only when
-  the server is unreachable or lacks the thread (log replay includes reconnect/recovery records). A saved
+  the server is unreachable or reports a missing thread (`thread not found`, `no rollout found for thread id`).
+  Recovery records in the log carry the snapshot's status, error, full message and completion time. A saved
   same-turn failure wins over a snapshot that lost its error. Exits 0 completed, 1 failed or interrupted, 2 unknown
   name or turn, 3 not finished. In `--help` and the README.
-- Outbox (revised after the Terra and Sol review): one JSON file per settled turn,
-  `outbox/<finishedAt>-<threadId>-<turnId>.json`, written to a temp file and renamed. No message preview: name,
-  thread, turn, cwd, status, failure class, exit code, finish time only. One idempotent `recordCompletion`,
-  called by the logger (best effort, never changes an exit code), by `wait` and by `result`, so a dead logger's
-  entry is repaired. Pruned at write time past 14 days or 2,000 entries (`CODEX_DRIVE_OUTBOX_MAX_AGE`,
-  `CODEX_DRIVE_OUTBOX_MAX_ENTRIES`). No log, rotation or PID locks.
-- `inbox [--follow] [--since <time>|--unread] [--ack]`: entries sorted by name, deduplicated per turn; `--ack`
-  creates an empty `<threadId>-<turnId>.acked` marker; `--follow` uses fs.watch plus a rescan and prints each new
-  entry once.
-- Tests (`test/result-inbox.test.mjs`): result cases, log-only and recovered completions, logger-written entry
-  with no client, adopt writes nothing, repair by wait/result, idempotency, crash between temp write and rename,
-  unread/ack/since, follow over 60 entries, prune, concurrent writers. The fixture now waits for detached
-  loggers it started to exit before removing its home (a teardown race the new write exposed).
-- Known limit: two recorders racing on the same turn can both publish; readers keep the first by name and prune
-  removes the extra with age or count.
+- Outbox (revised in two review rounds; requirement changes from the original goal: no message preview, and one
+  file per completion instead of an append-only rotated log): `outbox/<threadId>-<turnId>.json`, temp file
+  published with `link()` (EEXIST = already recorded), so one physical file per turn. Fields: name, thread, turn,
+  cwd, status, failure class, exit code, `finishedAt` (server completion time when known). One idempotent
+  `recordCompletion`, called by the logger, `wait` and `result`; failures go to a non-throwing sink. Pruned at
+  write time past 14 days or 2,000 distinct turns (`CODEX_DRIVE_OUTBOX_MAX_AGE`, `CODEX_DRIVE_OUTBOX_MAX_ENTRIES`).
+  No PID locks.
+- `inbox [--follow] [--since <time>|--unread] [--ack]`: ordered by `finishedAt`; `--ack` writes an empty
+  `<threadId>-<turnId>.acked` marker; `--follow` does baseline scan, watch, rescan, and prints each entry once.
+- Tests (`test/result-inbox.test.mjs`, 19): result cases, log-only and recovered completions, missing-thread
+  versus other RPC errors, disconnect/complete/recover/server-loss, logger entry with no client, adopt writes
+  nothing, repair by wait/result with server completion times, idempotency on disk, simultaneous publication by
+  eight processes (physical files asserted), crash between temp write and link, finish-time order and distinct
+  pruning, unread/ack/since, follow startup gap (in-process), follow over 60 entries, prune, outbox failure keeps
+  the exit code. The fixture waits for detached loggers it started before removing its home.
+- Known limits: a follower alone does not learn of a dead logger's turn until `wait` or `result` runs; two
+  followers can both print an entry before acknowledging it.

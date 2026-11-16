@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Rpc } from './rpc.mjs';
@@ -45,6 +46,7 @@ export async function snapshot(rpc, state, signal, targetTurnId) {
   state.turnId = turn.id; state.status = turn.status === 'inProgress' ? 'running' : turn.status; state.error = turn.error;
   if (terminal(state.status) && state.lastAgentMessage == null) await finalMessage(rpc, state, signal);
   state.failure = state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null;
+  return turn;
 }
 // Items are fetched only for a settled target lacking an event-captured message.
 // Summary turns can omit commentary, including the last message before failure.
@@ -69,9 +71,25 @@ export async function agentMessage(rpc, threadId, turnId, signal) {
   } while (cursor);
   return null;
 }
-export function recordQuietly(home, state, options, log = () => {}) {
+// The outbox is best effort: a failure is reported through a sink that never throws and never leaves pending
+// journal data, so it cannot change a command's outcome. wait and result repair a missing entry.
+const stderrSink = message => { try { process.stderr.write(`codex-drive: ${message}\n`); } catch { /* Best effort. */ } };
+export const journalSink = path => message => {
+  try { appendFileSync(path, JSON.stringify({ receivedAt: new Date().toISOString(), method: 'driver/diagnostic', params: { message } }) + '\n', { mode: 0o600 }); }
+  catch { /* Best effort. */ }
+};
+export function recordQuietly(home, state, options, report = stderrSink) {
   try { recordCompletion(home, state, options); }
-  catch (error) { try { log({ method: 'driver/diagnostic', params: { message: `Outbox entry not recorded: ${error.message}` } }); } catch { /* Diagnostics are best effort. */ } }
+  catch (error) { report(`Outbox entry not recorded: ${error.message}`); }
+}
+const completedTime = turn => turn?.completedAt ? turn.completedAt * 1000 : undefined;
+// A recovery record that lets a log-only result reconstruct a turn that settled while disconnected.
+async function recoveryParams(rpc, state, turn, signal) {
+  const params = { threadId: state.threadId, turnId: state.turnId, status: state.status };
+  if (!terminal(state.status) || !state.turnId) return params;
+  let message = null;
+  try { message = (await agentMessage(rpc, state.threadId, state.turnId, signal))?.text ?? null; } catch { /* The status is still worth recording. */ }
+  return { ...params, error: state.error ?? null, message, completedAt: turn?.completedAt ?? null };
 }
 export function warning(state) {
   if (state.sandbox === 'danger-full-access' || state.sandboxPolicy?.type === 'dangerFullAccess') console.error(`WARNING: danger-full-access; approval=${typeof state.approval === 'string' ? state.approval : JSON.stringify(state.approvalPolicy)}. Codex can modify files and run commands without sandbox protection.`);
@@ -125,7 +143,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   let unlock = options.name || state ? store.lock(state?.name ?? options.name ?? key) : () => {};
   let releaseServer;
   let ownedTurnId, announceTurnId;
-  const completedAt = new Map(); // Server completion time per turn, for the outbox entry name.
+  const completedAt = new Map(); // Server completion time per turn, for the outbox entry.
   let rpc, shuttingDown = false, reconnecting = false, ready = false, recoveryTask = Promise.resolve();
   let resolveDone, rejectDone;
   const newDone = () => { const promise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; }); promise.catch(() => {}); return promise; };
@@ -162,10 +180,13 @@ export async function runAttached(store, command, options, key, prompt, readyCal
           try {
             await delay(reconnectDelay(), undefined, { signal: controller.signal }); if (shuttingDown) return;
             next = new Rpc(port); rpc = next; wire(next); await next.connect(controller.signal);
-            await next.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal }); await snapshot(next, state, controller.signal, ownedTurnId);
+            await next.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal });
+            const recovered = await snapshot(next, state, controller.signal, ownedTurnId);
+            if (completedTime(recovered)) completedAt.set(recovered.id, completedTime(recovered));
+            const record = await recoveryParams(next, state, recovered, controller.signal);
             if (shuttingDown) return;
             if (next.socket.readyState !== WebSocket.OPEN) throw new Error('Recovery socket closed');
-            log({ method: 'driver/reconnected', params: { threadId: state.threadId, turnId: state.turnId, status: state.status } });
+            log({ method: 'driver/reconnected', params: record });
             store.save(state); reconnecting = false; if (terminal(state.status)) resolveDone(); return;
           } catch (error) { next?.close(); last = error; }
         }
@@ -185,12 +206,14 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       for (let attempt = 0; attempt < 15; attempt++) {
         try {
           await delay(reconnectDelay(), undefined, { signal: controller.signal }); rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
-          await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal }); await snapshot(rpc, state, controller.signal);
+          await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal });
+          const latest = await snapshot(rpc, state, controller.signal);
           if (state.turnId && state.turnId !== priorTurnId) {
+            if (completedTime(latest)) completedAt.set(latest.id, completedTime(latest));
             for (const event of buffered) if (event.method === 'account/rateLimits/updated') applyEvent(state, event);
             buffered.length = 0; state.lastEventTime = new Date().toISOString();
             turn = { id: state.turnId, status: state.status === 'running' ? 'inProgress' : state.status, error: state.error }; recovered = true;
-            log({ method: 'driver/startRecovered', params: { threadId: state.threadId, turnId: state.turnId, status: state.status } });
+            log({ method: 'driver/startRecovered', params: await recoveryParams(rpc, state, latest, controller.signal) });
           }
           break;
         } catch (error) { rpc.close(); if (controller.signal.aborted) throw error; }
@@ -209,7 +232,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   function announce() {
     if (!announceTurnId || state.turnId !== announceTurnId) return;
     announceTurnId = null;
-    recordQuietly(store.home, state, { finishedAt: completedAt.get(state.turnId) }, log);
+    recordQuietly(store.home, state, { finishedAt: completedAt.get(state.turnId) }, journalSink(logPath));
   }
   try {
     if (command === 'start' && options.name && findState(store, options.name)) throw new Error(`Thread name already exists: ${options.name}`);
@@ -296,7 +319,7 @@ export async function waitForTurn(store, options, key, report = value => console
   externalSignal?.addEventListener('abort', cancel, { once: true });
   if (externalSignal?.aborted) cancel();
   const timer = options.timeout ? setTimeout(() => controller.abort(new Error('Wait timed out')), Number(options.timeout) * 1000) : null;
-  let rpc, wake, pendingWake = false;
+  let rpc, wake, pendingWake = false, completedAt;
   const notify = () => { pendingWake = true; wake?.(); };
   const waitUntil = async deadline => {
     if (pendingWake) { pendingWake = false; return; }
@@ -322,6 +345,7 @@ export async function waitForTurn(store, options, key, report = value => console
               applyEvent(state, event);
               if (event.method === 'turn/completed' && event.params.threadId === state.threadId) {
                 const { status, error } = event.params.turn;
+                completedAt ??= completedTime(event.params.turn);
                 completions.set(eventTurnId, { status, error,
                   ...(state.turnId === eventTurnId && state.lastAgentMessage != null ? { lastAgentMessage: state.lastAgentMessage } : {}) });
               }
@@ -333,7 +357,8 @@ export async function waitForTurn(store, options, key, report = value => console
           nextSnapshot = 0; interval = 1000;
         }
         if (Date.now() >= nextSnapshot) {
-          await snapshot(rpc, state, controller.signal, targetTurnId);
+          const seen = await snapshot(rpc, state, controller.signal, targetTurnId);
+          if (!targetTurnId || seen?.id === targetTurnId) completedAt ??= completedTime(seen);
           nextSnapshot = Date.now() + interval; interval = Math.min(10000, interval * 2);
         }
         if (!state.turnId) throw new Error('Thread has no current turn');
@@ -345,7 +370,7 @@ export async function waitForTurn(store, options, key, report = value => console
         if (completion) Object.assign(state, completion);
         if (terminal(state.status)) {
           if (state.lastAgentMessage == null) await finalMessage(rpc, state, controller.signal);
-          recordQuietly(store.home, state); // Repairs the entry of a logger that died.
+          recordQuietly(store.home, state, { finishedAt: completedAt }); // Repairs the entry of a logger that died.
           break;
         }
         if (rpc.socket.readyState !== WebSocket.OPEN) throw new Error('Wait socket closed');

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync, utimesSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { fixture, until } from '../test-support/app-server.mjs';
-import { recordCompletion, readCompletions, outboxDir } from '../src/outbox.mjs';
+import { recordCompletion, readCompletions, outboxDir, follow } from '../src/outbox.mjs';
 
 const lines = text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 const files = home => { try { return readdirSync(outboxDir(home)).sort(); } catch { return []; } };
@@ -122,13 +123,16 @@ test('wait and result repair the entry of a logger that died', async t => {
   f.turns[0].status = 'inProgress'; f.turns[0].items = []; f.seed({ status: 'running' });
   const waiter = f.launch(['wait', 'demo']);
   await until(() => f.hasRead(), 'wait snapshot');
+  const done = Math.floor(Date.now() / 1000) - 100;
+  f.turns[0].completedAt = done;
   f.complete('completed', 'DONE');
   assert.equal((await waiter.result).code, 0);
-  assert.deepEqual(readCompletions(f.home).map(e => [e.turnId, e.status]), [['turn-1', 'completed']]);
-  f.turns.push({ id: 'turn-2', status: 'failed', items: [], error: { message: 'x', codexErrorInfo: 'serverOverloaded', additionalDetails: null } });
+  assert.deepEqual(readCompletions(f.home).map(e => [e.turnId, e.status, e.finishedAt]), [['turn-1', 'completed', new Date(done * 1000).toISOString()]]);
+  f.turns.push({ id: 'turn-2', status: 'failed', items: [], completedAt: done + 5, error: { message: 'x', codexErrorInfo: 'serverOverloaded', additionalDetails: null } });
   assert.equal((await f.command(['result', 'demo'])).code, 1);
   const repaired = readCompletions(f.home).find(e => e.turnId === 'turn-2');
   assert.equal(repaired.status, 'failed'); assert.equal(repaired.failure, 'capacity'); assert.equal(repaired.exitCode, 75);
+  assert.equal(repaired.finishedAt, new Date((done + 5) * 1000).toISOString(), 'the server completion time, not the observation time');
   assert.equal((await f.command(['result', 'demo', '--turn', 'turn-2'])).code, 1);
   assert.equal(readCompletions(f.home).length, 2, 'a second read records nothing new');
 });
@@ -138,12 +142,39 @@ test('recording is idempotent per thread and turn', async t => {
   const first = recordCompletion(f.home, turn('turn-a'), { finishedAt: Date.parse('2026-11-16T10:00:00.000Z') });
   const second = recordCompletion(f.home, turn('turn-a', { status: 'failed' }), { finishedAt: Date.parse('2026-11-16T11:00:00.000Z') });
   assert.equal(second, first);
-  assert.deepEqual(files(f.home), ['2026-11-16T10:00:00.000Z-thread-1-turn-a.json']);
+  assert.deepEqual(files(f.home), ['thread-1-turn-a.json']);
+  const [kept] = readCompletions(f.home);
+  assert.equal(kept.status, 'completed'); assert.equal(kept.finishedAt, '2026-11-16T10:00:00.000Z');
   assert.equal(recordCompletion(f.home, turn('turn-b', { status: 'running' })), null);
   assert.equal(recordCompletion(f.home, turn('turn-b', { status: 'idle' })), null);
-  // Two recorders that raced past the check: readers keep one entry per turn.
-  writeFileSync(join(outboxDir(f.home), '2026-11-16T12:00:00.000Z-thread-1-turn-a.json'), JSON.stringify({ turnId: 'turn-a', status: 'failed' }));
-  assert.deepEqual(readCompletions(f.home).map(e => e.status), ['completed']);
+  assert.deepEqual(files(f.home), ['thread-1-turn-a.json']);
+});
+
+test('inbox orders by finish time and pruning counts distinct turns', async t => {
+  const f = await fixture(t);
+  const base = Date.now() - 60000;
+  recordCompletion(f.home, turn('turn-z'), { finishedAt: base, maxEntries: 3 });
+  recordCompletion(f.home, turn('turn-a'), { finishedAt: base + 1000, maxEntries: 3 });
+  recordCompletion(f.home, turn('turn-a'), { finishedAt: base + 1500, maxEntries: 3 });
+  recordCompletion(f.home, turn('turn-m'), { finishedAt: base + 2000, maxEntries: 3 });
+  assert.deepEqual(lines((await f.command(['inbox'])).stdout).map(e => e.turnId), ['turn-z', 'turn-a', 'turn-m']);
+  recordCompletion(f.home, turn('turn-b'), { finishedAt: base + 3000, maxEntries: 3 });
+  assert.deepEqual(readCompletions(f.home).map(e => e.turnId), ['turn-a', 'turn-m', 'turn-b']);
+  assert.deepEqual(files(f.home), ['thread-1-turn-a.json', 'thread-1-turn-b.json', 'thread-1-turn-m.json']);
+  // A repaired turn already past the retention age is not published.
+  assert.equal(recordCompletion(f.home, turn('turn-old'), { finishedAt: Date.now() - 20 * 86400000 }), null);
+});
+
+test('follow prints a completion published between its baseline scan and its watch', async t => {
+  const f = await fixture(t);
+  recordCompletion(f.home, turn('turn-before'));
+  const printed = [], stop = new AbortController();
+  const running = follow(f.home, {}, entry => printed.push(entry.turnId), { signal: stop.signal, afterBaseline: () => recordCompletion(f.home, turn('turn-during')) });
+  await until(() => printed.includes('turn-during'), 'startup-gap completion');
+  recordCompletion(f.home, turn('turn-after'));
+  await until(() => printed.includes('turn-after'), 'watched completion');
+  stop.abort(); await running;
+  assert.deepEqual(printed, ['turn-during', 'turn-after']);
 });
 
 test('a crash between the temp write and the rename leaves no visible entry and is cleaned up', async t => {
@@ -208,18 +239,22 @@ test('recording prunes entries past the declared age and count, with their ackno
 test('concurrent writers never corrupt or duplicate the outbox', async t => {
   const f = await fixture(t);
   const writer = new URL('../src/outbox.mjs', import.meta.url).href;
+  // Every writer spins until the same instant, then publishes, so recorders really race.
   const script = `import { recordCompletion } from ${JSON.stringify(writer)};
-    const [home, id, shared] = process.argv.slice(1);
-    for (let i = 0; i < 40; i++) recordCompletion(home, { name: 'w', threadId: 't' + (shared ? 'shared' : id), turnId: 'turn' + i, cwd: '/', status: 'completed', error: null });`;
-  const run = shared => Promise.all(Array.from({ length: 6 }, (_, id) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', script, f.home, String(id), shared], { stdio: ['ignore', 'ignore', 'inherit'] });
+    const [home, id, shared, at] = process.argv.slice(1);
+    while (Date.now() < Number(at)) {}
+    for (let i = 0; i < 40; i++) recordCompletion(home, { name: 'w' + id, threadId: 't' + (shared ? 'shared' : id), turnId: 'turn' + i, cwd: '/', status: 'completed', error: null });`;
+  const run = shared => { const at = Date.now() + 400; return Promise.all(Array.from({ length: 8 }, (_, id) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, f.home, String(id), shared, String(at)], { stdio: ['ignore', 'ignore', 'inherit'] });
     child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error(`writer exited ${code}`)));
-  })));
+  }))); };
   await run('');
-  assert.equal(readCompletions(f.home).length, 240);
+  assert.equal(files(f.home).length, 320);
   await run('1');
-  const shared = readCompletions(f.home).filter(e => e.threadId === 'tshared');
-  assert.equal(shared.length, 40);
+  const physical = files(f.home).filter(name => name.startsWith('tshared-'));
+  assert.equal(physical.length, 40, 'one physical file per turn');
+  assert.deepEqual(physical, Array.from({ length: 40 }, (_, i) => `tshared-turn${i}.json`).sort());
+  for (const name of physical) JSON.parse(readFileSync(join(outboxDir(f.home), name), 'utf8'));
   assert.ok(!files(f.home).some(name => name.endsWith('.tmp')), 'no temp files left behind');
 });
 
@@ -229,4 +264,52 @@ test('help documents result exit codes and the inbox', async t => {
   assert.match(help.stdout, /result <name\|threadId> \[--turn <id>\] \[--json\]/);
   assert.match(help.stdout, /inbox \[--follow\] \[--since <time>\|--unread\] \[--ack\]/);
   assert.match(help.stdout, /Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3/);
+});
+
+test('result falls back to the log only for a missing thread and reports other RPC errors', async t => {
+  let error = null;
+  const f = await fixture(t, { turnsListError: () => error });
+  const events = [
+    { receivedAt: '2026-11-10T08:00:00.000Z', method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'turn-5', status: 'inProgress', items: [], error: null } } },
+    { receivedAt: '2026-11-10T08:00:01.000Z', method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-5', item: { type: 'agentMessage', id: 'a', text: 'FROM LOG' } } },
+    { receivedAt: '2026-11-10T08:00:02.000Z', method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-5', status: 'completed', items: [], error: null } } },
+  ];
+  writeFileSync(f.state.logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+  error = { code: -32603, message: 'internal error' };
+  const internal = await f.command(['result', 'demo']);
+  assert.equal(internal.code, 1); assert.match(internal.stderr, /internal error/); assert.equal(internal.stdout, '');
+  error = { code: -32600, message: 'thread not found: thread-1' };
+  const missing = await f.command(['result', 'demo', '--json']);
+  assert.equal(missing.code, 0, missing.stderr);
+  const json = JSON.parse(missing.stdout);
+  assert.equal(json.source, 'log'); assert.equal(json.message, 'FROM LOG');
+  assert.equal(readCompletions(f.home).find(e => e.turnId === 'turn-5').finishedAt, '2026-11-10T08:00:02.000Z', 'the journal completion time');
+});
+
+test('a completion recovered after a disconnect keeps its full message for a log-only result', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.command(['resume', 'demo', '--detach', 'Go'])).code, 0);
+  const current = f.turns.at(-1);
+  f.disconnect();
+  f.complete('completed', 'RECOVERED\nfull answer', current);
+  await until(() => JSON.parse(readFileSync(join(f.home, 'threads/demo.json'), 'utf8')).status === 'completed', 'recovered completion');
+  await until(() => readCompletions(f.home).some(e => e.turnId === current.id), 'logger outbox entry');
+  const saved = JSON.parse(readFileSync(join(f.home, 'threads/demo.json'), 'utf8'));
+  writeFileSync(join(f.home, 'threads/demo.json'), JSON.stringify({ ...saved, port: await closedPort() })); // The server is gone.
+  const result = await f.command(['result', 'demo', '--json']);
+  assert.equal(result.code, 0, result.stderr);
+  const json = JSON.parse(result.stdout);
+  assert.equal(json.source, 'log'); assert.equal(json.turnId, current.id); assert.equal(json.message, 'RECOVERED\nfull answer');
+});
+
+test('a failed outbox write never changes the logger exit code', async t => {
+  const f = await fixture(t);
+  writeFileSync(join(f.home, 'outbox'), 'not a directory');
+  const logger = f.launch(['resume', 'demo', 'Go']);
+  await until(() => f.turns.length === 2 && f.turns[1].status === 'inProgress', 'turn started');
+  await delay(100);
+  f.complete('completed', 'DONE');
+  const result = await logger.result;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(readFileSync(f.state.logPath, 'utf8'), /Outbox entry not recorded/);
 });
