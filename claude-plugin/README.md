@@ -89,6 +89,11 @@ Set these in the environment Claude Code starts with:
   once its output is written; a session that ends in that instant can miss the notification. Recover with
   `/codex-workers` or `codex-drive inbox --since 24h`, `status` and `result`, which show every completion still within
   the outbox retention (14 days or the newest 2,000 turns by default).
+- **Wake-up.** The documentation says only that what a monitor prints "reaches Claude as notifications". In a
+  test on Claude Code 2.1.325, a monitor line started a turn in an idle interactive session with no user message.
+  See [Verification](#verification).
+- **First run.** Sessions that settled before codex-drive had an outbox have no entry. On the first run, the hook
+  repairs those from the last 24 hours and lists them once as unread.
 
 ## Documentation used
 
