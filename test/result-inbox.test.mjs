@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
-import { readdirSync, readFileSync, writeFileSync, utimesSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, utimesSync, mkdirSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { fixture, until } from '../test-support/app-server.mjs';
 import { recordCompletion, readCompletions, outboxDir, follow } from '../src/outbox.mjs';
+import { underDir } from '../src/views.mjs';
 
 const lines = text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 const files = home => { try { return readdirSync(outboxDir(home)).sort(); } catch { return []; } };
@@ -262,7 +263,7 @@ test('help documents result exit codes and the inbox', async t => {
   const f = await fixture(t);
   const help = await f.command(['--help']);
   assert.match(help.stdout, /result <name\|threadId> \[--turn <id>\] \[--json\]/);
-  assert.match(help.stdout, /inbox \[--follow\] \[--since <time>\|--unread\] \[--ack\]/);
+  assert.match(help.stdout, /inbox \[<threadId@turnId>\.\.\.\] \[--follow\] \[--since <time>\|--unread\] \[--ack\] \[--cwd prefix\]/);
   assert.match(help.stdout, /Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3/);
 });
 
@@ -345,4 +346,31 @@ test('inbox --cwd keeps entries from that directory and below, for listing, ackn
   await delay(100);
   follower.child.kill('SIGTERM');
   assert.deepEqual(lines(follower.stdout()).map(e => e.turnId), ['turn-later']);
+});
+
+test('--cwd compares directories with symlinks resolved on both sides, including removed paths, at segment boundaries', t => {
+  mkdirSync('/tmp/codex-drive-proof', { recursive: true });
+  const root = mkdtempSync('/tmp/codex-drive-proof/cwd-'); // /tmp is itself a symlink on macOS
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'proj/lane'), { recursive: true }); mkdirSync(join(root, 'proj2'));
+  symlinkSync(join(root, 'proj'), join(root, 'link'));
+  const viaLink = underDir(join(root, 'link')), viaReal = underDir(join(root, 'proj'));
+  assert.ok(viaLink(join(root, 'proj/lane')), 'symlinked prefix, real recorded path');
+  assert.ok(viaReal(join(root, 'link/lane')), 'real prefix, symlinked recorded path');
+  assert.ok(viaReal(join(root, 'link')), 'the directory itself');
+  assert.ok(viaReal(join(root, 'link/removed/deeper')), 'a removed worktree under a symlinked spelling');
+  assert.ok(underDir(join(root, 'link/removed'))(join(root, 'proj/removed/x')), 'a removed prefix');
+  assert.ok(!viaReal(join(root, 'proj2')) && !viaLink(join(root, 'proj2/x')), 'a sibling sharing the prefix spelling');
+  assert.ok(!viaReal(null) && !viaReal(root), 'no cwd, or the parent');
+});
+
+test('inbox entry keys narrow a listing so --ack acknowledges exactly the delivered entries', async t => {
+  const f = await fixture(t);
+  for (const id of ['turn-a', 'turn-b', 'turn-c']) recordCompletion(f.home, turn(id));
+  const acked = await f.command(['inbox', '--ack', 'thread-1@turn-b', 'thread-1@turn-missing']);
+  assert.equal(acked.code, 0, acked.stderr);
+  assert.deepEqual(lines(acked.stdout).map(e => e.turnId), ['turn-b']);
+  assert.deepEqual(lines((await f.command(['inbox', '--unread'])).stdout).map(e => e.turnId), ['turn-a', 'turn-c']);
+  const following = await f.command(['inbox', '--follow', 'thread-1@turn-a']);
+  assert.notEqual(following.code, 0); assert.match(following.stderr, /takes no entry keys/);
 });

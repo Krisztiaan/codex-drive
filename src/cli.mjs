@@ -96,7 +96,7 @@ const usage = `Usage: codex-drive <command>
   wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
   status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob]
   result <name|threadId> [--turn <id>] [--json]
-  inbox [--follow] [--since <time>|--unread] [--ack] [--cwd prefix]
+  inbox [<threadId@turnId>...] [--follow] [--since <time>|--unread] [--ack] [--cwd prefix]
   prune [--calls] [--older-than 30d] [--apply]
   events <name|threadId> [--follow]
   tail <name|threadId> [-n 20]
@@ -124,7 +124,8 @@ latest settled turn or --turn; it reads the server, or the session log when the 
 Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
 inbox prints one JSON line per settled turn (no message text) recorded by its logger, wait or result;
 --since takes 24h or an ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints,
---cwd keeps entries whose worker ran in that directory or below it, --follow prints new ones as they are recorded.`;
+--cwd keeps entries whose worker ran in that directory or below it (symlinks resolved on both sides),
+entry keys keep only those entries (inbox --ack <key> acknowledges exactly one), --follow prints new ones as recorded.`;
 async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
@@ -158,7 +159,10 @@ async function main() {
     if (options.json) print(result); else console.log(resultText(result));
     process.exitCode = exitCode; return;
   }
-  if (command === 'inbox') { if (options.follow) await follow(store.home, options, print); else inbox(store.home, options, print); return; }
+  if (command === 'inbox') {
+    if (options.follow && positional.length) throw new Error('inbox --follow takes no entry keys');
+    if (options.follow) await follow(store.home, options, print); else inbox(store.home, { ...options, keys: positional }, print); return;
+  }
   if (command === 'wait') {
     if (positional.length === 1) { process.exitCode = await waitForTurn(store, options, positional[0]); return; }
     // Validate every identity before opening concurrent observers.

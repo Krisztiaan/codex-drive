@@ -70,7 +70,8 @@ function acknowledge(home, keys) {
 }
 function selector(home, options, now = Date.now()) {
   if (options.since && options.unread) throw new Error('Choose --since or --unread');
-  const within = underDir(options.cwd), inDir = ({ entry }) => within(entry.cwd);
+  const within = underDir(options.cwd), keys = options.keys?.length ? new Set(options.keys) : null;
+  const inDir = ({ key, entry }) => (!keys || keys.has(key)) && within(entry.cwd);
   if (options.since) {
     const cutoff = /^\d+(?:\.\d+)?[smhdw]$/.test(options.since) ? now - duration(options.since) : Date.parse(options.since);
     if (Number.isNaN(cutoff)) throw new Error('--since must be a duration such as 24h or an ISO time');
@@ -79,6 +80,8 @@ function selector(home, options, now = Date.now()) {
   if (options.unread) return item => inDir(item) && !existsSync(join(outboxDir(home), ackName(item.key)));
   return inDir;
 }
+// Positional keys (<threadId>@<turnId>, the entry's file name) narrow any selection to those entries, so a reader
+// can acknowledge exactly what it delivered: `inbox --ack <key>...`.
 export function inbox(home, options, print) {
   const chosen = entries(home).filter(selector(home, options));
   for (const { entry } of chosen) print(entry);
