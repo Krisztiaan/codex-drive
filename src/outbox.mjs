@@ -51,7 +51,7 @@ export function recordCompletion(home, state, { finishedAt, ...options } = {}) {
   if (!state?.turnId || !settled.includes(state.status)) return null;
   const time = finishedAt ?? Date.now();
   if (time < Date.now() - limits(options).age) return null; // Already past retention.
-  const dir = outboxDir(home), path = join(dir, `${checkKey(state.threadId)}-${checkKey(state.turnId)}.json`);
+  const dir = outboxDir(home), path = join(dir, `${checkKey(state.threadId)}@${checkKey(state.turnId)}.json` /* '@' is outside checkKey's alphabet, so the pair is unambiguous */);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (existsSync(path)) return path;
   const entry = { name: state.name ?? null, threadId: state.threadId, turnId: state.turnId, cwd: state.cwd ?? null, status: state.status,

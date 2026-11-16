@@ -142,12 +142,12 @@ test('recording is idempotent per thread and turn', async t => {
   const first = recordCompletion(f.home, turn('turn-a'), { finishedAt: Date.parse('2026-11-16T10:00:00.000Z') });
   const second = recordCompletion(f.home, turn('turn-a', { status: 'failed' }), { finishedAt: Date.parse('2026-11-16T11:00:00.000Z') });
   assert.equal(second, first);
-  assert.deepEqual(files(f.home), ['thread-1-turn-a.json']);
+  assert.deepEqual(files(f.home), ['thread-1@turn-a.json']);
   const [kept] = readCompletions(f.home);
   assert.equal(kept.status, 'completed'); assert.equal(kept.finishedAt, '2026-11-16T10:00:00.000Z');
   assert.equal(recordCompletion(f.home, turn('turn-b', { status: 'running' })), null);
   assert.equal(recordCompletion(f.home, turn('turn-b', { status: 'idle' })), null);
-  assert.deepEqual(files(f.home), ['thread-1-turn-a.json']);
+  assert.deepEqual(files(f.home), ['thread-1@turn-a.json']);
 });
 
 test('inbox orders by finish time and pruning counts distinct turns', async t => {
@@ -160,7 +160,7 @@ test('inbox orders by finish time and pruning counts distinct turns', async t =>
   assert.deepEqual(lines((await f.command(['inbox'])).stdout).map(e => e.turnId), ['turn-z', 'turn-a', 'turn-m']);
   recordCompletion(f.home, turn('turn-b'), { finishedAt: base + 3000, maxEntries: 3 });
   assert.deepEqual(readCompletions(f.home).map(e => e.turnId), ['turn-a', 'turn-m', 'turn-b']);
-  assert.deepEqual(files(f.home), ['thread-1-turn-a.json', 'thread-1-turn-b.json', 'thread-1-turn-m.json']);
+  assert.deepEqual(files(f.home), ['thread-1@turn-a.json', 'thread-1@turn-b.json', 'thread-1@turn-m.json']);
   // A repaired turn already past the retention age is not published.
   assert.equal(recordCompletion(f.home, turn('turn-old'), { finishedAt: Date.now() - 20 * 86400000 }), null);
 });
@@ -228,7 +228,7 @@ test('recording prunes entries past the declared age and count, with their ackno
   const f = await fixture(t);
   recordCompletion(f.home, turn('turn-ancient'), { finishedAt: Date.now() - 20 * 86400000, maxAge: '30d' });
   assert.equal((await f.command(['inbox', '--ack'])).code, 0);
-  assert.ok(files(f.home).includes('thread-1-turn-ancient.acked'));
+  assert.ok(files(f.home).includes('thread-1@turn-ancient.acked'));
   for (let i = 0; i < 8; i++) recordCompletion(f.home, turn(`turn-${i}`), { finishedAt: Date.now() - (8 - i) * 2000, maxEntries: 5 });
   assert.deepEqual(readCompletions(f.home).map(e => e.turnId), ['turn-3', 'turn-4', 'turn-5', 'turn-6', 'turn-7']);
   assert.ok(!files(f.home).some(name => name.includes('turn-ancient')), 'entry older than 14 days and its marker pruned');
@@ -251,9 +251,9 @@ test('concurrent writers never corrupt or duplicate the outbox', async t => {
   await run('');
   assert.equal(files(f.home).length, 320);
   await run('1');
-  const physical = files(f.home).filter(name => name.startsWith('tshared-'));
+  const physical = files(f.home).filter(name => name.startsWith('tshared@'));
   assert.equal(physical.length, 40, 'one physical file per turn');
-  assert.deepEqual(physical, Array.from({ length: 40 }, (_, i) => `tshared-turn${i}.json`).sort());
+  assert.deepEqual(physical, Array.from({ length: 40 }, (_, i) => `tshared@turn${i}.json`).sort());
   for (const name of physical) JSON.parse(readFileSync(join(outboxDir(f.home), name), 'utf8'));
   assert.ok(!files(f.home).some(name => name.endsWith('.tmp')), 'no temp files left behind');
 });
@@ -312,4 +312,18 @@ test('a failed outbox write never changes the logger exit code', async t => {
   const result = await logger.result;
   assert.equal(result.code, 0, result.stderr);
   assert.match(readFileSync(f.state.logPath, 'utf8'), /Outbox entry not recorded/);
+});
+
+test('completion file names keep thread and turn pairs distinct even when ids contain hyphens', async () => {
+  const { mkdtempSync, readdirSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { recordCompletion } = await import('../src/outbox.mjs');
+  const home = mkdtempSync(join(tmpdir(), 'cd-outbox-pair-'));
+  try {
+    recordCompletion(home, { threadId: 'a-b', turnId: 'c', status: 'completed' });
+    recordCompletion(home, { threadId: 'a', turnId: 'b-c', status: 'completed' });
+    const files = readdirSync(join(home, 'outbox')).filter(n => n.endsWith('.json'));
+    assert.equal(files.length, 2, files.join(','));
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
