@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, lstatSync, statSync, realpathSync, readdirSync } from 'node:fs';
-import { join, resolve, sep, dirname } from 'node:path';
+import { join, resolve, sep, dirname, basename } from 'node:path';
 import { checkKey } from './state.mjs';
 import { quotas } from './account.mjs';
 
@@ -9,11 +9,28 @@ export function duration(value) {
   return +match[1] * { s: 1000, m: 60000, h: 3600000, d: 86400000, w: 604800000 }[match[2]];
 }
 const clean = value => String(value ?? '-').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
+// A path's filesystem identity: symlinks resolved. A path that no longer exists (a removed worktree) resolves its
+// nearest existing ancestor and keeps the rest as written, so /tmp/gone and /private/tmp/gone still compare equal.
+export function canonicalPath(path) {
+  const absolute = resolve(path), missing = [];
+  for (let dir = absolute; ; dir = dirname(dir)) {
+    try { return join(realpathSync(dir), ...missing.reverse()); }
+    catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code) || dir === dirname(dir)) return absolute; missing.push(basename(dir)); }
+  }
+}
+// --cwd selects a directory and everything under it, for sessions and outbox entries alike. Both sides are
+// compared by canonicalPath, so a symlinked spelling on either side selects the same directory.
+export function underDir(prefix) {
+  if (!prefix) return () => true;
+  const dir = canonicalPath(prefix), base = dir.endsWith(sep) ? dir : dir + sep, seen = new Map();
+  const canonical = cwd => { if (!seen.has(cwd)) seen.set(cwd, canonicalPath(cwd)); return seen.get(cwd); };
+  return cwd => { if (!cwd) return false; const path = canonical(cwd); return path === dir || path.startsWith(base); };
+}
 export function filterStates(states, options, now = Date.now()) {
   const cutoff = options.since ? now - duration(options.since) : null;
   const glob = options.name ? new RegExp('^' + options.name.split('*').map(s => s.split('?').map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.')).join('.*') + '$') : null;
-  const prefix = options.cwd && resolve(options.cwd);
-  return states.filter(s => (!options.active || s.status === 'running') && (!prefix || s.cwd === prefix || s.cwd?.startsWith(prefix.endsWith(sep) ? prefix : prefix + sep)) && (!cutoff || Date.parse(s.lastEventTime) >= cutoff) && (!glob || glob.test(s.name ?? s.threadId)));
+  const within = underDir(options.cwd);
+  return states.filter(s => (!options.active || s.status === 'running') && within(s.cwd) && (!cutoff || Date.parse(s.lastEventTime) >= cutoff) && (!glob || glob.test(s.name ?? s.threadId)));
 }
 export function table(states) {
   const rows = [['NAME', 'STATUS', 'MODEL', 'CWD', 'EVENT AGE', 'LAST MESSAGE', 'USAGE LEFT']];

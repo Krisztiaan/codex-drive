@@ -1,0 +1,16 @@
+{
+  "description": "At session start, list this project's running codex-drive workers and the completions no session has seen yet.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-workers.mjs\" session-start",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

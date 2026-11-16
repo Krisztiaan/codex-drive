@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { checkKey } from './state.mjs';
 import { exitCode, failureDetails } from './failures.mjs';
-import { duration } from './views.mjs';
+import { duration, underDir } from './views.mjs';
 
 // Completion outbox: one small JSON file per settled turn, named <threadId>-<turnId>.json. It is written to a
 // temp file and published with link(), which never replaces an existing entry, so recording is idempotent and a
@@ -70,14 +70,18 @@ function acknowledge(home, keys) {
 }
 function selector(home, options, now = Date.now()) {
   if (options.since && options.unread) throw new Error('Choose --since or --unread');
+  const within = underDir(options.cwd), keys = options.keys?.length ? new Set(options.keys) : null;
+  const inDir = ({ key, entry }) => (!keys || keys.has(key)) && within(entry.cwd);
   if (options.since) {
     const cutoff = /^\d+(?:\.\d+)?[smhdw]$/.test(options.since) ? now - duration(options.since) : Date.parse(options.since);
     if (Number.isNaN(cutoff)) throw new Error('--since must be a duration such as 24h or an ISO time');
-    return ({ entry }) => Date.parse(entry.finishedAt) >= cutoff;
+    return item => inDir(item) && Date.parse(item.entry.finishedAt) >= cutoff;
   }
-  if (options.unread) return ({ key }) => !existsSync(join(outboxDir(home), ackName(key)));
-  return () => true;
+  if (options.unread) return item => inDir(item) && !existsSync(join(outboxDir(home), ackName(item.key)));
+  return inDir;
 }
+// Positional keys (<threadId>@<turnId>, the entry's file name) narrow any selection to those entries, so a reader
+// can acknowledge exactly what it delivered: `inbox --ack <key>...`.
 export function inbox(home, options, print) {
   const chosen = entries(home).filter(selector(home, options));
   for (const { entry } of chosen) print(entry);
