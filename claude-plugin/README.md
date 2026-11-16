@@ -87,8 +87,8 @@ Set these in the environment Claude Code starts with:
   acknowledged it. This happens when two sessions of one project read at the same moment, or when a session's hook
   and monitor both start while it is unread. Each reader prints an entry at most once. Claude Code gives a hook no receipt, so the plugin acknowledges an entry
   once its output is written; a session that ends in that instant can miss the notification. Recover with
-  `/codex-workers` or `codex-drive inbox --since 24h`, `status` and `result`, which show every completion still within
-  the outbox retention (14 days or the newest 2,000 turns by default).
+  `codex-drive inbox --cwd <project>` (every retained completion, read or not; retention is 14 days or the newest
+  2,000 turns by default), then `codex-drive result <name>`. `/codex-workers` shows only unread entries.
 - **Wake-up.** The documentation says only that what a monitor prints "reaches Claude as notifications". In a
   test on Claude Code 2.1.325, a monitor line started a turn in an idle interactive session with no user message.
   See [Verification](#verification).
