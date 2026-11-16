@@ -82,16 +82,13 @@ Set these in the environment Claude Code starts with:
 ## Behaviour to know
 
 - **Read state is shared.** One acknowledgement marker per completion is shared by every session and the
-  monitor, and delivery is at least once. A completion normally appears once: as a notification in a session whose
+  monitor. A completion normally appears once: as a notification in a session whose
   monitor is running, or at the next session start. It can appear twice when two readers list it before either has
   acknowledged it. This happens when two sessions of one project read at the same moment, or when a session's hook
-  and monitor both start while it is unread. Each reader prints an entry at most once. Nothing is lost:
-  `codex-drive inbox --cwd <project>` lists everything recorded, read or not.
-- **Wake-up.** The documentation says only that what a monitor prints "reaches Claude as notifications". In a
-  test on Claude Code 2.1.325, a monitor line started a turn in an idle interactive session with no user message.
-  See [Verification](#verification).
-- **First run.** Sessions that settled before codex-drive had an outbox have no entry. On the first run, the hook
-  repairs those from the last 24 hours and lists them once as unread.
+  and monitor both start while it is unread. Each reader prints an entry at most once. Claude Code gives a hook no receipt, so the plugin acknowledges an entry
+  once its output is written; a session that ends in that instant can miss the notification. Recover with
+  `/codex-workers` or `codex-drive inbox --since 24h`, `status` and `result`, which show every completion still within
+  the outbox retention (14 days or the newest 2,000 turns by default).
 
 ## Documentation used
 
