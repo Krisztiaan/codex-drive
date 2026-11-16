@@ -189,3 +189,11 @@ test('the monitor stops without acknowledging when its output is gone', async t 
   assert.ok(!readdirSync(join(f.home, 'outbox')).some(name => name.endsWith('.acked')));
   await until(() => spawnSync('pgrep', ['-f', `inbox --follow --unread --cwd ${f.home}`]).status === 1, 'follower stopped');
 });
+
+test('the codex-workers skill never substitutes user arguments into its pre-run shell command', async () => {
+  const { readFileSync } = await import('node:fs');
+  const skill = readFileSync(new URL('../claude-plugin/skills/codex-workers/SKILL.md', import.meta.url), 'utf8');
+  const commands = [...skill.matchAll(/!`([^`]*)`/g)].map(m => m[1]);
+  assert.ok(commands.length > 0, 'the skill pre-runs an overview command');
+  for (const command of commands) assert.doesNotMatch(command, /\$ARGUMENTS|\$\d/, command);
+});
