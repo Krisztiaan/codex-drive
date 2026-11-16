@@ -1,0 +1,7 @@
+[
+  {
+    "name": "codex-completions",
+    "command": "codex-drive inbox --follow --unread --ack --cwd \"${CLAUDE_PROJECT_DIR}\"",
+    "description": "codex-drive worker completions for this project, one line each"
+  }
+]

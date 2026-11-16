@@ -181,6 +181,8 @@ codex-drive result project-task               # on each line: full final message
 
 In a new or resumed session, run `codex-drive inbox --unread --ack` once to see completions that arrived while no follower ran, then `codex-drive status --active` for the workers still running.
 
+The Claude Code plugin in [`claude-plugin/`](claude-plugin/README.md) does all three per project: a `SessionStart` summary, a monitor on `inbox --follow --cwd <project>`, and `/codex-workers`.
+
 ## Server ownership and persistence
 
 The WebSocket endpoint is always `ws://127.0.0.1:<port>`; start/serve default to 4700. `serve` starts a standalone app-server and returns its actual listener PID, or reuses an existing listener. `serve --stop --port PORT` refuses while any server-loaded thread has active status, including approval-waiting threads, listing local names or thread IDs (including threads without local state). Inspection uses metadata-only `thread/read includeTurns:false`; unreadable or unknown status also refuses shutdown. `serve --restart --port PORT` waits up to 30 seconds for idle, then stops and starts on the same port; `--timeout seconds` changes the idle-wait budget. `--force` on stop/restart explicitly permits interruption and lists affected sessions on stderr. Start/resume dispatch and restart share a driver-home/port lock; independent raw clients and other driver homes must coordinate their mutations. `serve --stop --port PORT` targets only that port's verified recorded listener/child and refuses replacement listeners. Startup is serialized within the driver home. Processes are never selected by name. The driver does not alter the shared Codex daemon or configuration. Set `CODEX_HOME` before serve to select the server's histories and authentication.
