@@ -34,3 +34,25 @@ behind this goal: ~/.local/state/janus/audit-2026-11-09/agent-tooling-research-2
 - Don't touch other worktrees; never signal processes you didn't start.
 - Run headless; never open windows.
 - Commit on `goal/result-inbox`. Do not merge to main; the integrator lands it after review.
+
+## Outcome
+- `result <name|threadId> [--turn <id>] [--json]`: header `name status turnId [failure class]`, then the full final
+  agent message of the latest settled turn or `--turn`. Reads the server; falls back to the session log only when
+  the server is unreachable or lacks the thread (log replay includes reconnect/recovery records). A saved
+  same-turn failure wins over a snapshot that lost its error. Exits 0 completed, 1 failed or interrupted, 2 unknown
+  name or turn, 3 not finished. In `--help` and the README.
+- Outbox (revised after the Terra and Sol review): one JSON file per settled turn,
+  `outbox/<finishedAt>-<threadId>-<turnId>.json`, written to a temp file and renamed. No message preview: name,
+  thread, turn, cwd, status, failure class, exit code, finish time only. One idempotent `recordCompletion`,
+  called by the logger (best effort, never changes an exit code), by `wait` and by `result`, so a dead logger's
+  entry is repaired. Pruned at write time past 14 days or 2,000 entries (`CODEX_DRIVE_OUTBOX_MAX_AGE`,
+  `CODEX_DRIVE_OUTBOX_MAX_ENTRIES`). No log, rotation or PID locks.
+- `inbox [--follow] [--since <time>|--unread] [--ack]`: entries sorted by name, deduplicated per turn; `--ack`
+  creates an empty `<threadId>-<turnId>.acked` marker; `--follow` uses fs.watch plus a rescan and prints each new
+  entry once.
+- Tests (`test/result-inbox.test.mjs`): result cases, log-only and recovered completions, logger-written entry
+  with no client, adopt writes nothing, repair by wait/result, idempotency, crash between temp write and rename,
+  unread/ack/since, follow over 60 entries, prune, concurrent writers. The fixture now waits for detached
+  loggers it started to exit before removing its home (a teardown race the new write exposed).
+- Known limit: two recorders racing on the same turn can both publish; readers keep the first by name and prune
+  removes the extra with age or count.

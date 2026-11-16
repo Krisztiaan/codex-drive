@@ -145,11 +145,16 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   t.after(async () => {
     for (const child of children) child.kill('SIGTERM');
     // Detached driver PID is an owned test resource, never selected by name.
+    const drivers = [];
     for (const file of readdirSync(join(home, 'threads')).filter(f => f.endsWith('.json'))) {
       const saved = JSON.parse(readFileSync(join(home, 'threads', file), 'utf8'));
       const lock = join(home, 'threads', file) + '.lock';
       if (saved.driverPid && existsSync(lock) && Number(readFileSync(lock, 'utf8')) === saved.driverPid) { try { process.kill(saved.driverPid, 'SIGTERM'); } catch (e) { if (e.code !== 'ESRCH') throw e; } }
+      if (saved.driverPid) drivers.push(saved.driverPid);
     }
+    // A detached logger that just settled may still be writing; let it exit before removing its home.
+    const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; throw e; } };
+    for (let n = 0; n < 100 && drivers.some(alive); n++) await delay(50);
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));
     rmSync(home, { recursive: true, force: true });

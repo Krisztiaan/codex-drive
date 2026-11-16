@@ -134,20 +134,20 @@ Timeout accepts positive fractional seconds and covers connections/RPCs. It leav
 
 ## Results and the completion inbox
 
-`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest turn, or of `--turn`. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). When the server is unreachable or no longer knows the thread, it reads the session's own log instead; `--json` reports `source: "server"` or `"log"`. A failed or interrupted turn still prints the message that exists.
+`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest settled turn, or of `--turn`. A newer running turn does not hide the last settled one; the header names the turn. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). Only when the server is unreachable or no longer knows the thread does it read the session's own log, including the logger's reconnect and recovery records; `--json` reports `source: "server"` or `"log"`. As in `wait`, a failure the logger saved for the same turn wins over a history snapshot that lost its error. A failed or interrupted turn still prints the message that exists.
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | Completed |
 | 1 | Failed or interrupted (the message that exists is printed), or a command error |
 | 2 | Unknown name, thread ID or turn |
-| 3 | Not finished: the turn is still running, or the thread has no turn yet |
+| 3 | Not finished: the requested turn is still running, or no turn has settled yet |
 
-Every turn a logger (attached or `--detach`) saw running appends one JSON line to the completion outbox when it settles: `name`, `threadId`, `turnId`, `cwd`, `status` (`completed`, `failed`, `interrupted`), `failure` (`capacity`, `usageLimit`, `other` or null), `exitCode` (the `wait` contract), `finishedAt` and the first 300 characters of the final message. Error text, prompts and rate-limit payloads are never copied. The logger writes it, so the outbox fills with no `wait` running. Adopting an already settled turn writes nothing.
+Each settled turn gets one entry in the completion outbox, `CODEX_DRIVE_HOME/outbox/` (default `~/.codex-drive/outbox/`): a small JSON file named `<finishedAt>-<threadId>-<turnId>.json` with `name`, `threadId`, `turnId`, `cwd`, `status` (`completed`, `failed`, `interrupted`), `failure` (`capacity`, `usageLimit`, `other` or null), `exitCode` (the `wait` contract) and `finishedAt`. It holds no message text, errors or prompts; read content with `result`. The logger (attached or `--detach`) records each turn it saw running when it settles, so entries appear with no `wait` running. `wait` and `result` record the terminal turn they observe too, which repairs the entry of a logger that died. Recording is idempotent per thread and turn: an existing entry is left alone, and if two recorders race, readers keep the first by name. Each entry is written to a temporary file and renamed into place, so a crash never leaves a partial entry; temporary files older than an hour are removed. A failed recording is a best-effort diagnostic and never changes a command's exit code.
 
-The outbox lives at `CODEX_DRIVE_HOME/outbox/outbox.jsonl` (default `~/.codex-drive/outbox/`). It is append-only; each line is one `O_APPEND` write far below the atomic pipe size, so concurrent loggers never interleave. When it reaches 1 MiB (`CODEX_DRIVE_OUTBOX_BYTES` adjusts this), the next writer renames it to `outbox.1.jsonl` under a lock, replacing the older generation; the outbox therefore holds at most two generations. A failed append is logged as a driver diagnostic and does not change the turn's exit code.
+Each write prunes entries older than 14 days or beyond the newest 2,000, with their acknowledgement markers. Both are adjustable: `CODEX_DRIVE_OUTBOX_MAX_AGE` (a duration such as `30d`) and `CODEX_DRIVE_OUTBOX_MAX_ENTRIES`.
 
-`inbox` prints the outbox, oldest first, one JSON line per entry. `--since 24h` (or an ISO time) limits by `finishedAt`; `--unread` skips acknowledged entries; `--ack` acknowledges what it prints. Acknowledgements are kept in `outbox/acked.json` and are dropped with rotated-out entries. `--follow` watches the outbox directory (no polling) and prints each new completion as it is appended, following rotation; combined with `--unread` or `--since` it prints that backlog first. A follower more than a whole generation behind can miss entries.
+`inbox` prints the entries sorted by name (finish time), one JSON line each. `--since 24h` (or an ISO time) limits by `finishedAt`; `--unread` skips acknowledged entries; `--ack` acknowledges what it prints by creating an empty `<threadId>-<turnId>.acked` marker beside it. `--follow` watches the outbox directory (no polling), rescans on start and on each change, and prints each new entry once; combined with `--unread` or `--since` it prints that backlog first.
 
 ## Orchestrator pattern
 

@@ -11,7 +11,7 @@ import { connection, journal, lifecycleEvent } from './client.mjs';
 import { accountHealth } from './account.mjs';
 import { steersFor } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
-import { appendCompletion, completionEntry } from './outbox.mjs';
+import { recordCompletion } from './outbox.mjs';
 
 const reconnectDelay = () => 500 + Math.floor(Math.random() * 251);
 export const terminal = status => ['completed', 'failed', 'interrupted', 'idle'].includes(status);
@@ -69,6 +69,10 @@ export async function agentMessage(rpc, threadId, turnId, signal) {
   } while (cursor);
   return null;
 }
+export function recordQuietly(home, state, options, log = () => {}) {
+  try { recordCompletion(home, state, options); }
+  catch (error) { try { log({ method: 'driver/diagnostic', params: { message: `Outbox entry not recorded: ${error.message}` } }); } catch { /* Diagnostics are best effort. */ } }
+}
 export function warning(state) {
   if (state.sandbox === 'danger-full-access' || state.sandboxPolicy?.type === 'dangerFullAccess') console.error(`WARNING: danger-full-access; approval=${typeof state.approval === 'string' ? state.approval : JSON.stringify(state.approvalPolicy)}. Codex can modify files and run commands without sandbox protection.`);
 }
@@ -121,7 +125,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   let unlock = options.name || state ? store.lock(state?.name ?? options.name ?? key) : () => {};
   let releaseServer;
   let ownedTurnId, announceTurnId;
-  const messages = new Map(); // Full final agent message per turn, for the outbox preview.
+  const completedAt = new Map(); // Server completion time per turn, for the outbox entry name.
   let rpc, shuttingDown = false, reconnecting = false, ready = false, recoveryTask = Promise.resolve();
   let resolveDone, rejectDone;
   const newDone = () => { const promise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; }); promise.catch(() => {}); return promise; };
@@ -133,8 +137,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     if (!ready) { buffered.push(event); return; }
     const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
     if (ownedTurnId && eventTurnId && eventTurnId !== ownedTurnId) return;
-    const item = event.params?.item;
-    if (event.method === 'item/completed' && item?.type === 'agentMessage' && item.text?.trim() && event.params.threadId === state.threadId) messages.set(event.params.turnId, item.text);
+    if (event.method === 'turn/completed' && event.params.threadId === state.threadId && event.params.turn.completedAt) completedAt.set(event.params.turn.id, event.params.turn.completedAt * 1000);
     if (applyEvent(state, event)) {
       dirty = true;
       if (lifecycleEvent(event)) flushState();
@@ -202,18 +205,11 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     if (params.sandboxPolicy !== undefined && params.sandboxPolicy !== null) effectiveState(state, { sandbox: params.sandboxPolicy });
   }
   // Announce a turn this logger saw running once it settles, whether or not any client waits.
-  async function announce() {
+  // Best effort: wait and result repair a missing entry; the turn's outcome never depends on it.
+  function announce() {
     if (!announceTurnId || state.turnId !== announceTurnId) return;
-    let text = messages.get(state.turnId) ?? null;
-    if (text == null) {
-      try { text = (await agentMessage(rpc, state.threadId, state.turnId, controller.signal))?.text ?? null; }
-      catch (error) { log({ method: 'driver/diagnostic', params: { message: `Outbox preview unavailable: ${error.message}` } }); }
-    }
-    const entry = completionEntry(state, text);
-    if (!entry) return;
     announceTurnId = null;
-    try { appendCompletion(store.home, entry); }
-    catch (error) { log({ method: 'driver/diagnostic', params: { message: `Outbox append failed: ${error.message}` } }); }
+    recordQuietly(store.home, state, { finishedAt: completedAt.get(state.turnId) }, log);
   }
   try {
     if (command === 'start' && options.name && findState(store, options.name)) throw new Error(`Thread name already exists: ${options.name}`);
@@ -256,7 +252,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       if (rpc.socket.readyState !== WebSocket.OPEN) rpc.emit('disconnect');
       await done;
       state.failure = state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null;
-      await announce();
+      announce();
       if (state.failure?.class !== 'capacity' || retry >= Number(options['retry-capacity'] ?? 0)) break;
       const failedTurnId = state.turnId;
       const backoff = Math.min(30000, 1000 * 2 ** retry);
@@ -349,6 +345,7 @@ export async function waitForTurn(store, options, key, report = value => console
         if (completion) Object.assign(state, completion);
         if (terminal(state.status)) {
           if (state.lastAgentMessage == null) await finalMessage(rpc, state, controller.signal);
+          recordQuietly(store.home, state); // Repairs the entry of a logger that died.
           break;
         }
         if (rpc.socket.readyState !== WebSocket.OPEN) throw new Error('Wait socket closed');

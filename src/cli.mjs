@@ -120,10 +120,11 @@ Combined exit: 76 if any usage limit, otherwise largest observed exit code.
 Prune defaults to dry-run; --apply removes confirmed old terminal local sessions.
 Wait exits: completed 0, other/error 1, capacity 75, usage limit 76, interrupted 130, timeout 124.
 result prints a header line (name status turnId [failure class]) and the full final agent message of the
-latest turn or --turn; it reads the server, or the session log when the server is gone.
+latest settled turn or --turn; it reads the server, or the session log when the server is gone.
 Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
-inbox prints one JSON line per settled turn from the outbox the turn's logger writes; --since takes 24h or an
-ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints, --follow prints new ones live.`;
+inbox prints one JSON line per settled turn (no message text) recorded by its logger, wait or result;
+--since takes 24h or an ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints,
+--follow prints new ones as they are recorded.`;
 async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
