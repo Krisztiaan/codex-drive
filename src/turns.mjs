@@ -11,6 +11,7 @@ import { connection, journal, lifecycleEvent } from './client.mjs';
 import { accountHealth } from './account.mjs';
 import { steersFor } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
+import { appendCompletion, completionEntry } from './outbox.mjs';
 
 const reconnectDelay = () => 500 + Math.floor(Math.random() * 251);
 export const terminal = status => ['completed', 'failed', 'interrupted', 'idle'].includes(status);
@@ -25,12 +26,17 @@ export function portFor(options, state) {
 export function statusView(store, state) {
   return { ...state, steers: steersFor(store, state), failure: state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null, pendingRequests: pendingRequests(store.home, state.threadId) };
 }
-export async function snapshot(rpc, state, signal, targetTurnId) {
+// The latest turn, or the target turn, without items.
+export async function findTurn(rpc, threadId, targetTurnId, signal) {
   let cursor, turn;
   do {
-    const page = await rpc.request('thread/turns/list', { threadId: state.threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) }, { signal });
+    const page = await rpc.request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) }, { signal });
     turn = targetTurnId ? page.data.find(turn => turn.id === targetTurnId) : page.data[0]; cursor = page.nextCursor;
   } while (!turn && cursor);
+  return turn ?? null;
+}
+export async function snapshot(rpc, state, signal, targetTurnId) {
+  const turn = await findTurn(rpc, state.threadId, targetTurnId, signal);
   if (!turn) {
     if (targetTurnId) throw new Error(`Turn ${targetTurnId} is unavailable`);
     state.turnId = null; state.status = 'idle'; state.error = null; state.lastAgentMessage = null; state.failure = null; return;
@@ -48,14 +54,20 @@ async function finalMessage(rpc, state, signal) {
   if (!read) messageReads.set(rpc, read = new Set());
   const key = state.threadId + ':' + state.turnId;
   if (read.has(key)) return;
+  const item = await agentMessage(rpc, state.threadId, state.turnId, signal);
+  if (item) applyEvent(state, { method: 'item/completed', params: { threadId: state.threadId, turnId: state.turnId, item } });
+  read.add(key);
+}
+// The turn's final (newest non-empty) agent message item, searched newest first.
+export async function agentMessage(rpc, threadId, turnId, signal) {
   let cursor;
   do {
-    const page = await rpc.request('thread/items/list', { threadId: state.threadId, turnId: state.turnId, sortDirection: 'desc', limit: 1, ...(cursor ? { cursor } : {}) }, { signal });
+    const page = await rpc.request('thread/items/list', { threadId, turnId, sortDirection: 'desc', limit: 1, ...(cursor ? { cursor } : {}) }, { signal });
     const item = page.data.find(entry => entry.item.type === 'agentMessage' && entry.item.text.trim())?.item;
-    if (item) { applyEvent(state, { method: 'item/completed', params: { threadId: state.threadId, turnId: state.turnId, item } }); break; }
+    if (item) return item;
     cursor = page.nextCursor;
   } while (cursor);
-  read.add(key);
+  return null;
 }
 export function warning(state) {
   if (state.sandbox === 'danger-full-access' || state.sandboxPolicy?.type === 'dangerFullAccess') console.error(`WARNING: danger-full-access; approval=${typeof state.approval === 'string' ? state.approval : JSON.stringify(state.approvalPolicy)}. Codex can modify files and run commands without sandbox protection.`);
@@ -108,7 +120,8 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   const broker = new RequestBroker({ home: store.home, log: brokerLog, policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId ?? (command === 'start' ? undefined : key) });
   let unlock = options.name || state ? store.lock(state?.name ?? options.name ?? key) : () => {};
   let releaseServer;
-  let ownedTurnId;
+  let ownedTurnId, announceTurnId;
+  const messages = new Map(); // Full final agent message per turn, for the outbox preview.
   let rpc, shuttingDown = false, reconnecting = false, ready = false, recoveryTask = Promise.resolve();
   let resolveDone, rejectDone;
   const newDone = () => { const promise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; }); promise.catch(() => {}); return promise; };
@@ -120,6 +133,8 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     if (!ready) { buffered.push(event); return; }
     const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
     if (ownedTurnId && eventTurnId && eventTurnId !== ownedTurnId) return;
+    const item = event.params?.item;
+    if (event.method === 'item/completed' && item?.type === 'agentMessage' && item.text?.trim() && event.params.threadId === state.threadId) messages.set(event.params.turnId, item.text);
     if (applyEvent(state, event)) {
       dirty = true;
       if (lifecycleEvent(event)) flushState();
@@ -180,11 +195,25 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       if (!recovered) throw new Error(`turn/start outcome unconfirmed; input was not replayed. Inspect status before retrying: ${error.message}`);
     }
     if (state.turnId !== turn.id) state.lastAgentMessage = null;
-    ownedTurnId = turn.id;
+    ownedTurnId = announceTurnId = turn.id;
     state.turnId = turn.id; state.status = turn.status === 'inProgress' ? 'running' : turn.status; state.error = turn.error;
     for (const key of ['cwd', 'model', 'effort']) if (params[key] !== undefined) state[key] = params[key];
     if (params.approvalPolicy !== undefined) state.approval = params.approvalPolicy;
     if (params.sandboxPolicy !== undefined && params.sandboxPolicy !== null) effectiveState(state, { sandbox: params.sandboxPolicy });
+  }
+  // Announce a turn this logger saw running once it settles, whether or not any client waits.
+  async function announce() {
+    if (!announceTurnId || state.turnId !== announceTurnId) return;
+    let text = messages.get(state.turnId) ?? null;
+    if (text == null) {
+      try { text = (await agentMessage(rpc, state.threadId, state.turnId, controller.signal))?.text ?? null; }
+      catch (error) { log({ method: 'driver/diagnostic', params: { message: `Outbox preview unavailable: ${error.message}` } }); }
+    }
+    const entry = completionEntry(state, text);
+    if (!entry) return;
+    announceTurnId = null;
+    try { appendCompletion(store.home, entry); }
+    catch (error) { log({ method: 'driver/diagnostic', params: { message: `Outbox append failed: ${error.message}` } }); }
   }
   try {
     if (command === 'start' && options.name && findState(store, options.name)) throw new Error(`Thread name already exists: ${options.name}`);
@@ -210,7 +239,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     if (prepared.turn.effort !== undefined) state.effort = prepared.turn.effort;
     if (options['add-dir']) state.addDirs = options['add-dir'];
     effectiveState(state, result);
-    if (command !== 'start') { await snapshot(rpc, state, controller.signal); ownedTurnId = state.turnId; }
+    if (command !== 'start') { await snapshot(rpc, state, controller.signal); ownedTurnId = state.turnId; if (state.status === 'running') announceTurnId = state.turnId; }
     if (command === 'start' || command === 'resume' && (prompt !== undefined || prepared.turn.input.length)) {
       if (state.status === 'running') throw new Error(`Thread has a running turn (${state.turnId}); use steer`);
       await startTurn({ ...prepared.turn, threadId: state.threadId });
@@ -227,6 +256,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       if (rpc.socket.readyState !== WebSocket.OPEN) rpc.emit('disconnect');
       await done;
       state.failure = state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null;
+      await announce();
       if (state.failure?.class !== 'capacity' || retry >= Number(options['retry-capacity'] ?? 0)) break;
       const failedTurnId = state.turnId;
       const backoff = Math.min(30000, 1000 * 2 ** retry);

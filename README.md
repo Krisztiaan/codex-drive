@@ -132,6 +132,23 @@ Classification uses only `codexErrorInfo`, never error prose. Other structured v
 
 Timeout accepts positive fractional seconds and covers connections/RPCs. It leaves the turn running. Without a timeout there is no overall deadline; transport recovery is bounded to 15 attempts. Wait is read-only with respect to the thread state file. Status/wait cannot recreate notification history missed while no logger was attached.
 
+## Results and the completion inbox
+
+`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest turn, or of `--turn`. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). When the server is unreachable or no longer knows the thread, it reads the session's own log instead; `--json` reports `source: "server"` or `"log"`. A failed or interrupted turn still prints the message that exists.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Completed |
+| 1 | Failed or interrupted (the message that exists is printed), or a command error |
+| 2 | Unknown name, thread ID or turn |
+| 3 | Not finished: the turn is still running, or the thread has no turn yet |
+
+Every turn a logger (attached or `--detach`) saw running appends one JSON line to the completion outbox when it settles: `name`, `threadId`, `turnId`, `cwd`, `status` (`completed`, `failed`, `interrupted`), `failure` (`capacity`, `usageLimit`, `other` or null), `exitCode` (the `wait` contract), `finishedAt` and the first 300 characters of the final message. Error text, prompts and rate-limit payloads are never copied. The logger writes it, so the outbox fills with no `wait` running. Adopting an already settled turn writes nothing.
+
+The outbox lives at `CODEX_DRIVE_HOME/outbox/outbox.jsonl` (default `~/.codex-drive/outbox/`). It is append-only; each line is one `O_APPEND` write far below the atomic pipe size, so concurrent loggers never interleave. When it reaches 1 MiB (`CODEX_DRIVE_OUTBOX_BYTES` adjusts this), the next writer renames it to `outbox.1.jsonl` under a lock, replacing the older generation; the outbox therefore holds at most two generations. A failed append is logged as a driver diagnostic and does not change the turn's exit code.
+
+`inbox` prints the outbox, oldest first, one JSON line per entry. `--since 24h` (or an ISO time) limits by `finishedAt`; `--unread` skips acknowledged entries; `--ack` acknowledges what it prints. Acknowledgements are kept in `outbox/acked.json` and are dropped with rotated-out entries. `--follow` watches the outbox directory (no polling) and prints each new completion as it is appended, following rotation; combined with `--unread` or `--since` it prints that backlog first. A follower more than a whole generation behind can miss entries.
+
 ## Orchestrator pattern
 
 ```sh
@@ -149,6 +166,18 @@ codex-drive resume alternative --detach "Try the alternate approach"
 ```
 
 Own the event follower's PID if you start it. Approval responses and steering may be issued concurrently with wait. Decide whether to resume, spend more after a usage limit, or report failure from the exit code and final JSON. `adopt` extends this pattern to existing histories; `call` reaches additional server/account/control APIs without another wrapper.
+
+## Integrating with Claude Code
+
+Start workers detached, follow the outbox from a background task or monitor, and read each result when its line arrives. Nothing depends on a `wait` staying alive, and a new session picks up what finished meanwhile with `inbox --unread`.
+
+```sh
+codex-drive start --cwd /path/to/project --name project-task --detach "Do the bounded work"
+codex-drive inbox --follow --unread --ack     # background task or monitor: one line per completion
+codex-drive result project-task               # on each line: full final message; exit 0/1/2/3
+```
+
+In a new or resumed session, run `codex-drive inbox --unread --ack` once to see completions that arrived while no follower ran, then `codex-drive status --active` for the workers still running.
 
 ## Server ownership and persistence
 

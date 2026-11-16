@@ -16,6 +16,8 @@ import { accountHealth, usageText } from './account.mjs';
 import { filterStates, table, recordSteer, pruneCandidates, pruneCalls, removeSession } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 import { pendingRequests, respond } from './requests.mjs';
+import { turnResult, resultText } from './results.mjs';
+import { inbox, follow } from './outbox.mjs';
 import { findState, portFor, snapshot, statusView, runAttached, waitForTurn, warning, effectiveState, attachedDefaults } from './turns.mjs';
 
 const detachedWorker = typeof process.send === 'function';
@@ -93,6 +95,8 @@ const usage = `Usage: codex-drive <command>
   fork <name|threadId> [--name <new-name>] [--log <file>]
   wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
   status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob]
+  result <name|threadId> [--turn <id>] [--json]
+  inbox [--follow] [--since <time>|--unread] [--ack]
   prune [--calls] [--older-than 30d] [--apply]
   events <name|threadId> [--follow]
   tail <name|threadId> [-n 20]
@@ -114,7 +118,12 @@ Use --request-policy manual|decline for stricter request handling; resume respec
 Multi-wait defaults to --all; --any closes observers without interrupting turns.
 Combined exit: 76 if any usage limit, otherwise largest observed exit code.
 Prune defaults to dry-run; --apply removes confirmed old terminal local sessions.
-Wait exits: completed 0, other/error 1, capacity 75, usage limit 76, interrupted 130, timeout 124.`;
+Wait exits: completed 0, other/error 1, capacity 75, usage limit 76, interrupted 130, timeout 124.
+result prints a header line (name status turnId [failure class]) and the full final agent message of the
+latest turn or --turn; it reads the server, or the session log when the server is gone.
+Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
+inbox prints one JSON line per settled turn from the outbox the turn's logger writes; --since takes 24h or an
+ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints, --follow prints new ones live.`;
 async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
@@ -143,6 +152,12 @@ async function main() {
   }
   if (command === 'pending') { print(pendingRequests(store.home, positional[0] ? findState(store, positional[0])?.threadId ?? positional[0] : undefined)); return; }
   if (command === 'respond') { const payload = readJson(positional[1]); print(await respond(store.home, positional[0], options.error ? undefined : payload, { error: options.error ? payload : undefined })); return; }
+  if (command === 'result') {
+    const { result, exitCode } = await turnResult(store, options, positional[0]);
+    if (options.json) print(result); else console.log(resultText(result));
+    process.exitCode = exitCode; return;
+  }
+  if (command === 'inbox') { if (options.follow) await follow(store.home, options, print); else inbox(store.home, options, print); return; }
   if (command === 'wait') {
     if (positional.length === 1) { process.exitCode = await waitForTurn(store, options, positional[0]); return; }
     // Validate every identity before opening concurrent observers.
