@@ -7,7 +7,7 @@ const allowed = {
   serve: ['port', 'stop', 'restart', 'force', 'timeout'], start: [...turnOptions, 'name', 'log'], resume: [...turnOptions, 'name', 'log'],
   adopt: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'], attach: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'],
   fork: ['name', 'log', 'sandbox', 'approval', 'thread-params', 'request-policy'],
-  steer: ['turn'], interrupt: ['turn'], status: ['json', 'active', 'cwd', 'since', 'name'], result: ['turn', 'json'], inbox: ['follow', 'since', 'unread', 'ack'], wait: ['timeout', 'all', 'any'], tail: ['n'], events: ['follow'],
+  steer: ['turn'], interrupt: ['turn'], status: ['json', 'active', 'cwd', 'since', 'name'], result: ['turn', 'json'], inbox: ['follow', 'since', 'unread', 'ack', 'cwd'], wait: ['timeout', 'all', 'any'], tail: ['n'], events: ['follow'],
   pending: [], respond: ['error'], call: ['request-policy'], methods: [],
   list: [], read: [], archive: [], unarchive: [], rollback: [], compact: [], name: [], models: [], account: ['json'], 'rate-limits': ['json'], prune: ['older-than', 'apply', 'calls'],
 };

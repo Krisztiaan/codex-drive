@@ -327,3 +327,22 @@ test('completion file names keep thread and turn pairs distinct even when ids co
     assert.equal(files.length, 2, files.join(','));
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
+
+test('inbox --cwd keeps entries from that directory and below, for listing, acknowledging and following', async t => {
+  const f = await fixture(t);
+  recordCompletion(f.home, turn('turn-here', { cwd: '/work/project' }));
+  recordCompletion(f.home, turn('turn-below', { cwd: '/work/project/.worktrees/lane' }));
+  recordCompletion(f.home, turn('turn-sibling', { cwd: '/work/project-other' }));
+  const listed = await f.command(['inbox', '--cwd', '/work/project', '--unread', '--ack']);
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.deepEqual(lines(listed.stdout).map(e => e.turnId).sort(), ['turn-below', 'turn-here']);
+  assert.deepEqual(lines((await f.command(['inbox', '--unread'])).stdout).map(e => e.turnId), ['turn-sibling'], 'only the printed entries were acknowledged');
+  const follower = f.launch(['inbox', '--follow', '--cwd', '/work/project/']);
+  await delay(200);
+  recordCompletion(f.home, turn('turn-later-sibling', { cwd: '/work/project-other' }));
+  recordCompletion(f.home, turn('turn-later', { cwd: '/work/project' }));
+  await until(() => follower.stdout().includes('turn-later'), 'followed project entry');
+  await delay(100);
+  follower.child.kill('SIGTERM');
+  assert.deepEqual(lines(follower.stdout()).map(e => e.turnId), ['turn-later']);
+});

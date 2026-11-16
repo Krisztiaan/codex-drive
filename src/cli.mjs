@@ -96,7 +96,7 @@ const usage = `Usage: codex-drive <command>
   wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
   status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob]
   result <name|threadId> [--turn <id>] [--json]
-  inbox [--follow] [--since <time>|--unread] [--ack]
+  inbox [--follow] [--since <time>|--unread] [--ack] [--cwd prefix]
   prune [--calls] [--older-than 30d] [--apply]
   events <name|threadId> [--follow]
   tail <name|threadId> [-n 20]
@@ -124,7 +124,7 @@ latest settled turn or --turn; it reads the server, or the session log when the 
 Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
 inbox prints one JSON line per settled turn (no message text) recorded by its logger, wait or result;
 --since takes 24h or an ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints,
---follow prints new ones as they are recorded.`;
+--cwd keeps entries whose worker ran in that directory or below it, --follow prints new ones as they are recorded.`;
 async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
