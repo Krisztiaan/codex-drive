@@ -1,11 +1,11 @@
 ---
 name: codex-workers
-description: Show this project's running codex-drive workers and their unread Codex results.
+description: Show this project's running codex-drive workers and unread completions, or one worker's final message in full.
+argument-hint: "[worker name]"
 disable-model-invocation: true
 allowed-tools: Bash(node *codex-workers.mjs* show *)
 ---
 
-!`node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-workers.mjs" show "${CLAUDE_PROJECT_DIR}"`
+!`node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-workers.mjs" show "${CLAUDE_PROJECT_DIR}" $ARGUMENTS`
 
-Report this to the user: the running workers, then each unread result's outcome and its main points. Run no
-other command for this report. A longer result is one `codex-drive result <name>` away.
+Report this to the user as it stands. Run no other command for this report.
