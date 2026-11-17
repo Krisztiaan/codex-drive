@@ -176,7 +176,7 @@ Start workers detached, follow the outbox from a background task or monitor, and
 ```sh
 codex-drive start --cwd /path/to/project --name project-task --detach "Do the bounded work"
 codex-drive inbox --follow --unread --ack     # background task or monitor: one line per completion
-codex-drive result project-task               # on each line: full final message; exit 0/1/2/3
+codex-drive result project-task --turn <id>   # the line's turnId: that turn's full final message; exit 0/1/2/3
 ```
 
 In a new or resumed session, run `codex-drive inbox --unread --ack` once to see completions that arrived while no follower ran, then `codex-drive status --active` for the workers still running.

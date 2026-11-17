@@ -57,10 +57,14 @@ test('the SessionStart hook lists running workers and unread completions as meta
   assert.equal(first.code, 0, first.stderr);
   assert.equal(first.stdout, [
     `codex-drive: 1 running under ${f.home}: demo`,
-    'codex-drive: 1 finished; read with codex-drive result <name> or /codex-workers <name>:',
-    '  demo completed at 2026-11-16T10:00:00.000Z',
+    'codex-drive: 1 finished:',
+    '  demo completed at 2026-11-16T10:00:00.000Z; read it with codex-drive result demo --turn turn-1',
   ].join('\n') + '\n');
   assert.ok(!first.stdout.includes('SECRET'));
+  // The worker has since started turn-2; the printed command still reads the completion it names.
+  const hint = first.stdout.split('\n')[2].split('; read it with codex-drive ')[1].split(' ');
+  const read = await f.command(hint);
+  assert.equal(read.code, 0, read.stderr); assert.match(read.stdout, /^demo completed turn-1\n/);
   assert.deepEqual(await unread(f), ['turn-x'], 'acknowledged only what it showed');
   assert.equal((await hook(f)).stdout, `codex-drive: 1 running under ${f.home}: demo\n`);
 });
@@ -71,7 +75,7 @@ test('the SessionStart hook repairs the outbox entry of a settled turn whose log
   assert.equal(readCompletions(f.home).length, 0);
   const output = await hook(f);
   assert.equal(output.code, 0, output.stderr);
-  assert.match(output.stdout, /^codex-drive: 1 finished; .*\n {2}demo completed at \S+\n$/);
+  assert.match(output.stdout, /^codex-drive: 1 finished:\n {2}demo completed at \S+; read it with codex-drive result demo --turn turn-1\n$/);
   assert.deepEqual(readCompletions(f.home).map(e => [e.turnId, e.status]), [['turn-1', 'completed']]);
   assert.deepEqual(await unread(f), []);
 });
@@ -114,7 +118,7 @@ test('a stalled server does not stall session start, and unread completions are 
   assert.equal(output.code, 0, output.stderr);
   assert.ok(output.ms < 5000, `took ${output.ms} ms`);
   assert.match(output.stdout, /codex-drive status did not finish within 1\.5 s/);
-  assert.match(output.stdout, /\n {2}demo completed at \S+\n$/);
+  assert.match(output.stdout, /\n {2}demo completed at \S+; read it with codex-drive result demo --turn turn-1\n$/);
   assert.deepEqual(await unread(f), []);
 });
 
@@ -137,10 +141,10 @@ test('/codex-workers lists metadata only and acknowledges it; /codex-workers <na
   const overview = await view(f, '');
   assert.equal(overview.code, 0, overview.stderr);
   assert.match(overview.stdout, new RegExp(`^## Running under ${f.home} \\(1\\)\\n- demo \\(gpt-6.1-sol, last event \\d+s ago\\)\\n`));
-  assert.match(overview.stdout, /## Unread completions \(1\)\n- demo completed at \S+\n/);
+  assert.match(overview.stdout, /## Unread completions \(1\)\n- demo completed at \S+; read it with codex-drive result demo --turn turn-1\n/);
   assert.ok(!overview.stdout.includes('SECRET'), 'no message or running text in the overview');
   assert.deepEqual(await unread(f), []);
-  assert.match((await view(f, '')).stdout, /## Already read, last 24h \(1\)\n- demo completed at \S+\n/);
+  assert.match((await view(f, '')).stdout, /## Already read, last 24h \(1\)\n- demo completed at \S+; read it with codex-drive result demo --turn turn-1\n/);
   f.turns.pop(); // turn-2 settles away; the latest settled turn is turn-1
   const one = await view(f, 'demo');
   assert.equal(one.code, 0, one.stderr);
@@ -169,7 +173,7 @@ test('the monitor prints one metadata line per completion of this project and ac
   recordCompletion(f.home, entry('turn-1', { cwd: join(f.home, '.worktrees/lane'), status: 'failed', error: { message: 'limit', codexErrorInfo: 'usageLimitExceeded', additionalDetails: null } }), { finishedAt: Date.parse('2026-11-16T11:00:00Z') });
   await until(() => follower.stdout().includes('demo'), 'monitor line');
   await until(async () => (await unread(f)).length === 1, 'acknowledged');
-  assert.equal(follower.stdout(), 'codex-drive: demo failed (usageLimit) at 2026-11-16T11:00:00.000Z; read it with codex-drive result demo\n');
+  assert.equal(follower.stdout(), 'codex-drive: demo failed (usageLimit) at 2026-11-16T11:00:00.000Z; read it with codex-drive result demo --turn turn-1\n');
   assert.deepEqual(await unread(f), ['turn-other']);
 });
 

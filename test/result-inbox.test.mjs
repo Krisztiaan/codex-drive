@@ -92,6 +92,25 @@ test('result reads a log-only session when its server is gone, including recover
   assert.equal(unfinished.code, 3, unfinished.stderr); assert.equal(unfinished.stdout, 'demo running turn-9\n');
 });
 
+test('the log fallback treats a recovered or reconnected running turn as the latest turn', async t => {
+  const f = await fixture(t);
+  f.seed({ port: await closedPort(), status: 'running', turnId: 'turn-8' });
+  const settled = [
+    { method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'turn-7', status: 'inProgress', items: [], error: null } } },
+    { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-7', item: { type: 'agentMessage', id: 'a', text: 'Older' } } },
+    { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-7', status: 'completed', items: [], error: null } } },
+  ];
+  // The start event of turn-8 was missed; only the recovery snapshot names it.
+  for (const method of ['driver/startRecovered', 'driver/reconnected']) {
+    const events = [...settled, { method, params: { threadId: 'thread-1', turnId: 'turn-8', status: 'running' } }];
+    writeFileSync(f.state.logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+    const latest = await f.command(['result', 'demo']);
+    assert.equal(latest.code, 3, `${method}: ${latest.stderr}`); assert.equal(latest.stdout, 'demo running turn-8\n');
+    const older = await f.command(['result', 'demo', '--turn', 'turn-7']);
+    assert.equal(older.code, 0, older.stderr); assert.equal(older.stdout, 'demo completed turn-7\nOlder\n');
+  }
+});
+
 test('a detached logger records the completion with no client waiting, without message text', async t => {
   const f = await fixture(t);
   const started = await f.command(['start', '--port', String(f.port), '--cwd', f.home, '--name', 'bg', '--detach', 'Go']);

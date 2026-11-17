@@ -39,8 +39,10 @@ function fromLog(options, state) {
     if (method === 'turn/started') update(params.turn.id, {});
     else if (method === 'turn/completed') update(params.turn.id, { status: params.turn.status, error: params.turn.error ?? null, finishedAt: at(params.turn.completedAt) });
     else if (method === 'item/completed' && params.item?.type === 'agentMessage' && params.item.text?.trim()) update(params.turnId, { message: params.item.text });
-    else if (['driver/reconnected', 'driver/startRecovered'].includes(method) && params.turnId && params.status !== 'running') {
-      update(params.turnId, { status: params.status, error: params.error ?? null, finishedAt: at(params.completedAt), ...(params.message ? { message: params.message } : {}) });
+    else if (['driver/reconnected', 'driver/startRecovered'].includes(method) && params.turnId) {
+      // A recovery snapshot names the turn even when its start event was missed; a running one stays in progress.
+      if (params.status === 'running') update(params.turnId, {});
+      else update(params.turnId, { status: params.status, error: params.error ?? null, finishedAt: at(params.completedAt), ...(params.message ? { message: params.message } : {}) });
     }
   }
   const all = [...turns.values()];
