@@ -12,7 +12,7 @@ function frame(message) {
   if (body.length > 65535) { header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(body.length), 2); }
   return Buffer.concat([header, body]);
 }
-export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, initializeEvents = [], resumeEvents = [], threadStatus, threadFlags = [], turnsListError } = {}) {
+export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsList, account, usage, historyFile, cliPath, initializeEvents = [], resumeEvents = [], threadStatus, threadFlags = [], turnsListError, steerCompletes = true } = {}) {
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
@@ -119,7 +119,16 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
             }
             result = { turn }; break;
           }
-          case 'turn/steer': result = { turnId: params.expectedTurnId }; complete('completed', 'STEERED', (threads.get(params.threadId) ?? turns).at(-1)); break;
+          case 'turn/steer': {
+            const turn = (threads.get(params.threadId) ?? turns).at(-1);
+            result = { turnId: params.expectedTurnId };
+            if (steerCompletes) { complete('completed', 'STEERED', turn); break; }
+            // The native server keeps the turn running: it clears the thread goal and adds the input as a user message.
+            const item = { type: 'userMessage', id: `steer-${turn.items.length}`, content: params.input };
+            turn.items.push(item); persist();
+            emit('thread/goal/cleared', { threadId: params.threadId }); emit('item/completed', { threadId: params.threadId, turnId: turn.id, item });
+            break;
+          }
           case 'turn/interrupt': result = {}; complete('interrupted', null, (threads.get(params.threadId) ?? turns).at(-1)); break;
           default: socket.write(frame({ id, error: { code: -32601, message: `Unexpected fixture method ${method}` } })); continue;
         }

@@ -17,7 +17,7 @@ async function closedPort() {
   const { port } = server.address(); await new Promise(resolve => server.close(resolve)); return port;
 }
 
-test('result prints the full multi-line final message of the latest settled turn and of a named turn', async t => {
+test('result prints the full multi-line final message of the latest turn and of a named turn', async t => {
   const f = await fixture(t);
   f.turns[0].items = [{ type: 'agentMessage', id: 'm-1', text: 'Earlier note' }, { type: 'agentMessage', id: 'm-2', text: 'Line one\nLine two\n\nLine four' }];
   f.turns.push({ id: 'turn-2', status: 'completed', items: [{ type: 'agentMessage', id: 'm-3', text: 'SECOND\nturn' }], error: null });
@@ -30,8 +30,9 @@ test('result prints the full multi-line final message of the latest settled turn
   assert.equal(json.name, 'demo'); assert.equal(json.threadId, 'thread-1'); assert.equal(json.turnId, 'turn-1');
   assert.equal(json.status, 'completed'); assert.equal(json.message, 'Line one\nLine two\n\nLine four'); assert.equal(json.source, 'server');
   f.turns.push({ id: 'turn-3', status: 'inProgress', items: [], error: null });
-  const settled = await f.command(['result', 'thread-1']);
-  assert.equal(settled.code, 0, settled.stderr); assert.match(settled.stdout, /^demo completed turn-2\n/);
+  // A newer running turn is the latest turn: not finished, never an older settled turn.
+  const latestRunning = await f.command(['result', 'thread-1']);
+  assert.equal(latestRunning.code, 3, latestRunning.stderr); assert.equal(latestRunning.stdout, 'demo running turn-3\n');
   const running = await f.command(['result', 'demo', '--turn', 'turn-3']);
   assert.equal(running.code, 3); assert.equal(running.stdout, 'demo running turn-3\n');
 });
@@ -80,7 +81,9 @@ test('result reads a log-only session when its server is gone, including recover
   ];
   writeFileSync(f.state.logPath, events.map(e => JSON.stringify(e)).join('\n') + '\n');
   const latest = await f.command(['result', 'demo']);
-  assert.equal(latest.code, 1, latest.stderr); assert.equal(latest.stdout, 'demo interrupted turn-8\n');
+  assert.equal(latest.code, 3, latest.stderr); assert.equal(latest.stdout, 'demo running turn-9\n');
+  const interrupted = await f.command(['result', 'demo', '--turn', 'turn-8']);
+  assert.equal(interrupted.code, 1, interrupted.stderr); assert.equal(interrupted.stdout, 'demo interrupted turn-8\n');
   const named = await f.command(['result', 'demo', '--turn', 'turn-7', '--json']);
   assert.equal(named.code, 0, named.stderr);
   const json = JSON.parse(named.stdout);

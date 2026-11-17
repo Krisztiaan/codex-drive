@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { connection } from './client.mjs';
 import { failureDetails } from './failures.mjs';
-import { findState, agentMessage, portFor, recordQuietly } from './turns.mjs';
+import { findState, findTurn, agentMessage, portFor, recordQuietly } from './turns.mjs';
 
 // Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
 const exits = { completed: 0, failed: 1, interrupted: 1 };
@@ -12,18 +12,6 @@ const view = (state, turn, message, source) => ({ name: state.name ?? null, thre
 // History snapshots can lose a terminal error; the saved failure of the same turn wins, as in wait.
 const reconcile = (state, turn) => turn && turn.id === state.turnId && state.status === 'failed' && ['failed', 'interrupted'].includes(turn.status) ? { ...turn, status: 'failed', error: state.error ?? turn.error } : turn;
 
-// The named turn, or the newest settled turn; null when the named turn does not exist.
-async function serverTurn(rpc, threadId, target) {
-  let cursor, newest = null;
-  do {
-    const page = await rpc.request('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'notLoaded', ...(cursor ? { cursor } : {}) });
-    newest ??= page.data[0] ?? null;
-    const turn = page.data.find(turn => target ? turn.id === target : turn.status !== 'inProgress');
-    if (turn) return turn;
-    cursor = page.nextCursor;
-  } while (cursor);
-  return target ? null : newest; // No settled turn yet: report the running one (or none).
-}
 // The app-server's errors for a thread it does not know; every other RPC error is reported as is.
 const missingThread = error => /^(thread not found|no rollout found for thread id)\b/i.test(error.rpcError?.message ?? '');
 // Unavailable means no server or a server without this thread.
@@ -32,7 +20,7 @@ async function fromServer(options, state, port) {
   try { rpc = await connection(port); } catch (error) { return { unavailable: error }; }
   try {
     let turn;
-    try { turn = reconcile(state, await serverTurn(rpc, state.threadId, options.turn)); }
+    try { turn = reconcile(state, await findTurn(rpc, state.threadId, options.turn)); } // The latest turn, or --turn.
     catch (error) { if (missingThread(error)) return { unavailable: error }; throw error; }
     if (!turn) return { result: options.turn ? null : view(state, null, null, 'server') };
     const message = turn.status === 'inProgress' ? null : (await agentMessage(rpc, state.threadId, turn.id))?.text ?? null;
@@ -56,7 +44,7 @@ function fromLog(options, state) {
     }
   }
   const all = [...turns.values()];
-  const turn = reconcile(state, options.turn ? turns.get(options.turn) : all.findLast(turn => turn.status !== 'inProgress') ?? all.at(-1));
+  const turn = reconcile(state, options.turn ? turns.get(options.turn) : all.at(-1));
   if (!turn) return { result: options.turn ? null : view(state, null, null, 'log') };
   return { result: view(state, turn, turn.status === 'inProgress' ? null : turn.message ?? null, 'log'), turn, finishedAt: turn.finishedAt };
 }

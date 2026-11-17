@@ -149,7 +149,7 @@ async function show(scope, name) {
   await emit(out.join('\n'));
   await acknowledge(shown, deadline);
 }
-// The latest settled turn of one worker, in full: the only view that shows message text.
+// The latest turn of one worker, in full: the only view that shows message text.
 async function showOne(name) {
   if (!NAME.test(name)) { await emit(`Not a codex-drive worker name: ${cut(clean(name), 80)}`); return; }
   const deadline = Date.now() + SHOW_DEADLINE_MS;
