@@ -35,8 +35,9 @@ const firstLine = text => clean(text).split('\n').map(line => line.trim()).find(
 const jsonLines = text => text.split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 const seconds = ms => `${Math.round(ms / 100) / 10} s`;
 const failureClass = failure => failure ? ` (${typeof failure === 'string' ? failure : failure.class})` : '';
-// Metadata only: name, status, failure class and finish time; never message text.
-const completion = entry => `${label(entry)} ${clean(entry.status)}${clean(failureClass(entry.failure))} at ${clean(entry.finishedAt)}`;
+// Metadata only: name, status, failure class, finish time and the command that reads exactly this turn (a newer
+// turn of the same worker must not answer it); never message text.
+const completion = entry => `${label(entry)} ${clean(entry.status)}${clean(failureClass(entry.failure))} at ${clean(entry.finishedAt)}; read it with codex-drive result ${label(entry)} --turn ${clean(entry.turnId)}`;
 const emit = text => new Promise((resolve, reject) => process.stdout.write(text + '\n', error => error ? reject(error) : resolve()));
 
 // One codex-drive call that ends by `until` (absolute ms): SIGTERM to its process group at the time, SIGKILL after
@@ -116,7 +117,7 @@ async function sessionStart(scope) {
   const { deadline, unread } = view, lines = [...runningLines(scope, view.list), ...view.lines];
   let shown = [];
   if (unread.length) {
-    lines.push(`codex-drive: ${unread.length} finished; read with codex-drive result <name> or /codex-workers <name>:`);
+    lines.push(`codex-drive: ${unread.length} finished:`);
     const room = Math.max(2, MAX_LINES - lines.length);
     shown = unread.length > room ? unread.slice(-(room - 1)) : unread;
     for (const entry of shown) lines.push(`  ${completion(entry)}`);
@@ -145,11 +146,11 @@ async function show(scope, name) {
   for (const entry of shown) out.push(`- ${completion(entry)}`);
   if (shown.length < unread.length) out.push(`- ${unread.length - shown.length} earlier ones stay unread`);
   if (recent.length) { out.push('', `## Already read, last ${WINDOW} (${recent.length})`); for (const entry of recent) out.push(`- ${completion(entry)}`); }
-  out.push('', 'Read one in full with /codex-workers <name> or codex-drive result <name>.');
+  out.push('', "/codex-workers <name> shows a worker's latest turn in full.");
   await emit(out.join('\n'));
   await acknowledge(shown, deadline);
 }
-// The latest settled turn of one worker, in full: the only view that shows message text.
+// The latest turn of one worker, in full: the only view that shows message text.
 async function showOne(name) {
   if (!NAME.test(name)) { await emit(`Not a codex-drive worker name: ${cut(clean(name), 80)}`); return; }
   const deadline = Date.now() + SHOW_DEADLINE_MS;
@@ -176,7 +177,7 @@ async function follow(scope) {
     queue = queue.then(async () => {
       const [entry] = jsonLines(line);
       if (!entry) return;
-      await emit(`codex-drive: ${completion(entry)}; read it with codex-drive result ${label(entry)}`);
+      await emit(`codex-drive: ${completion(entry)}`);
       await acknowledge([entry], Date.now() + CALL_TIMEOUT_MS);
     }).catch(() => stop(1)); // stdout gone: stop without acknowledging
   });

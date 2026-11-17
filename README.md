@@ -134,7 +134,7 @@ Timeout accepts positive fractional seconds and covers connections/RPCs. It leav
 
 ## Results and the completion inbox
 
-`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest settled turn, or of `--turn`. A newer running turn does not hide the last settled one; the header names the turn. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). It reads the session's own log only when the server is unreachable or answers that it does not know the thread (`thread not found` or `no rollout found for thread id`); every other server error is reported. Log replay includes the logger's reconnect and recovery records, which carry the status, error, full final message and completion time found by the recovery snapshot. `--json` reports `source: "server"` or `"log"`. As in `wait`, a failure the logger saved for the same turn wins over a history snapshot that lost its error. A failed or interrupted turn still prints the message that exists.
+`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest turn, or of `--turn`. While the latest turn is still running it prints only the header (`name running turnId`) and exits 3; it never substitutes an older settled turn. Read an earlier turn with `--turn`. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). It reads the session's own log only when the server is unreachable or answers that it does not know the thread (`thread not found` or `no rollout found for thread id`); every other server error is reported. Log replay includes the logger's reconnect and recovery records, which carry the status, error, full final message and completion time found by the recovery snapshot. `--json` reports `source: "server"` or `"log"`. As in `wait`, a failure the logger saved for the same turn wins over a history snapshot that lost its error. A failed or interrupted turn still prints the message that exists.
 
 | Exit | Meaning |
 | --- | --- |
@@ -176,7 +176,7 @@ Start workers detached, follow the outbox from a background task or monitor, and
 ```sh
 codex-drive start --cwd /path/to/project --name project-task --detach "Do the bounded work"
 codex-drive inbox --follow --unread --ack     # background task or monitor: one line per completion
-codex-drive result project-task               # on each line: full final message; exit 0/1/2/3
+codex-drive result project-task --turn <id>   # the line's turnId: that turn's full final message; exit 0/1/2/3
 ```
 
 In a new or resumed session, run `codex-drive inbox --unread --ack` once to see completions that arrived while no follower ran, then `codex-drive status --active` for the workers still running.

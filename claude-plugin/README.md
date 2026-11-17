@@ -7,11 +7,11 @@ directory and everything below it (worktrees included).
 | Part | What it does |
 | --- | --- |
 | `SessionStart` hook (`hooks/hooks.json`) | On startup, resume, clear and compact, prints at most 12 lines: the names of the project's running workers, then the completions no session has seen yet. Silent when nothing runs and nothing is unread. |
-| Monitor `codex-completions` (`monitors/monitors.json`) | Follows `codex-drive inbox --follow --unread --cwd <project>` for the whole session. Each completion prints one line, which reaches Claude as a notification: `codex-drive: <name> <status> (<failure>) at <finishedAt>; read it with codex-drive result <name>`. |
-| `/codex-workers` (`skills/codex-workers/SKILL.md`) | With no argument: the running workers (name, model, last event age), the unread completions, and the completions already seen in the last 24 hours. With a worker name, `/codex-workers <name>`: that worker's latest final message in full. Also available as `/codex-drive:codex-workers`. |
+| Monitor `codex-completions` (`monitors/monitors.json`) | Follows `codex-drive inbox --follow --unread --cwd <project>` for the whole session. Each completion prints one line, which reaches Claude as a notification: `codex-drive: <name> <status> (<failure>) at <finishedAt>; read it with codex-drive result <name> --turn <turnId>`. The command names the exact turn, so a newer turn of the same worker never answers it. |
+| `/codex-workers` (`skills/codex-workers/SKILL.md`) | With no argument: the running workers (name, model, last event age), the unread completions, and the completions already seen in the last 24 hours. Each listed completion carries the same `codex-drive result <name> --turn <turnId>` command. With a worker name, `/codex-workers <name>`: that worker's latest turn, its final message in full, or only its header while it is still running. Also available as `/codex-drive:codex-workers`. |
 
 **No message text appears on its own.** The hook, the monitor and the `/codex-workers` overview show metadata
-only: name, status, failure class and finish time. A worker's running message and final message never reach a
+only: name, status, failure class, finish time and the command that reads that turn. A worker's running message and final message never reach a
 session unless a person asks: `/codex-workers <name>` (the skill cannot be invoked by Claude itself) or
 `codex-drive result <name>`.
 
@@ -88,7 +88,7 @@ Set these in the environment Claude Code starts with:
   and monitor both start while it is unread. Each reader prints an entry at most once. Claude Code gives a hook no receipt, so the plugin acknowledges an entry
   once its output is written; a session that ends in that instant can miss the notification. Recover with
   `codex-drive inbox --cwd <project>` (every retained completion, read or not; retention is 14 days or the newest
-  2,000 turns by default), then `codex-drive result <name>`. `/codex-workers` shows the running workers, up to 50 unread completions (older ones stay unread) and up to eight already-read completions from
+  2,000 turns by default), then `codex-drive result <name> --turn <turnId>` with the entry's own turn. `/codex-workers` shows the running workers, up to 50 unread completions (older ones stay unread) and up to eight already-read completions from
   the last 24 hours.
 - **Wake-up.** The documentation says only that what a monitor prints "reaches Claude as notifications". In a
   test on Claude Code 2.1.325, a monitor line started a turn in an idle interactive session with no user message.

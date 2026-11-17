@@ -136,3 +136,31 @@ test('status refuses an explicit port that differs from the saved thread server'
   assert.equal(result.code, 1);
   assert.match(result.stderr, /Port differs from thread server/);
 });
+
+test('wait follows the resumed turn across a steer and returns only when that turn settles', async t => {
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { readdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const f = await fixture(t, { steerCompletes: false });
+  const resumed = await f.command(['resume', 'demo', '--detach', 'Go']);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).turnId, 'turn-2');
+  const reads = () => f.received.filter(m => m.method === 'thread/turns/list').length, before = reads();
+  const waiters = [['wait', 'demo', '--timeout', '30'], ['wait', 'demo', 'thread-1', '--any', '--timeout', '30'], ['wait', 'demo', 'thread-1', '--all', '--timeout', '30']]
+    .map(args => { const run = f.launch(args); run.ended = false; run.result.then(() => { run.ended = true; }); return run; });
+  await until(() => reads() >= before + 5, 'every observer snapshot');
+  const steer = await f.command(['steer', 'demo', 'Use build-4']);
+  assert.equal(steer.code, 0, steer.stderr); assert.deepEqual(JSON.parse(steer.stdout), { turnId: 'turn-2' });
+  await delay(1500); // Past each observer's next snapshot.
+  for (const run of waiters) assert.equal(run.ended, false, 'wait returned while the steered turn was still running');
+  const status = JSON.parse((await f.command(['status', 'demo'])).stdout);
+  assert.equal(status.status, 'running'); assert.equal(status.turnId, 'turn-2');
+  f.complete('completed', 'DONE', f.turns.at(-1));
+  for (const run of waiters) {
+    const result = await run.result;
+    assert.equal(result.code, 0, result.stderr);
+    for (const line of result.stdout.trim().split('\n').map(JSON.parse)) { assert.equal(line.turnId, 'turn-2'); assert.equal(line.status, 'completed'); assert.equal(line.lastAgentMessage, 'DONE'); }
+  }
+  await until(() => readdirSync(join(f.home, 'outbox')).includes('thread-1@turn-2.json'), 'outbox entry');
+  assert.deepEqual(readdirSync(join(f.home, 'outbox')).filter(name => name.startsWith('thread-1@')), ['thread-1@turn-2.json']);
+});
