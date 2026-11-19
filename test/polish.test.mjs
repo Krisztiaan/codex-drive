@@ -1,31 +1,78 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture, until } from '../test-support/app-server.mjs';
+import { fixture, until, writeLogin } from '../test-support/app-server.mjs';
 import { filterStates, duration } from '../src/views.mjs';
 
-function identity(f, id = 'current') {
-  mkdirSync(join(f.home, 'codex'), { recursive: true });
-  writeFileSync(join(f.home, 'codex', 'auth.json'), JSON.stringify({ tokens: { account_id: id, id_token: 'x.' + Buffer.from(JSON.stringify({ email: 'current@example.test' })).toString('base64url') + '.SECRET' } }));
-}
 const account = { account: { type: 'chatgpt', email: 'old@example.test', planType: 'pro' }, requiresOpenaiAuth: true };
 const usage = { accountId: 'old', ordinaryUsageAllowed: false, rateLimits: { primary: { usedPercent: 95, resetsAt: 1800000000 } } };
 
 test('account summaries, raw escape hatch, stale identity and near-limit detached warnings', async t => {
-  const f = await fixture(t, { account, usage }); identity(f);
+  const f = await fixture(t, { account, usage }); writeLogin(join(f.home, 'codex'), 'current@example.test', 'current');
+  const allow = ['--port', String(f.port), '--allow-other-account'];
   const summary = await f.command(['account', '--port', String(f.port)]);
   assert.equal(summary.code, 0, summary.stderr);
   assert.match(summary.stdout, /old@example.test.*pro/); assert.match(summary.stdout, /95% used; resets/); assert.match(summary.stdout, /Ordinary usage allowed: no/);
-  assert.match(summary.stderr, /server account differs/); assert.doesNotMatch(summary.stdout + summary.stderr, /SECRET/);
-  const raw = await f.command(['rate-limits', '--json', '--port', String(f.port)]);
+  assert.match(summary.stdout, /current@example.test/); assert.match(summary.stdout, /mismatch/);
+  assert.doesNotMatch(summary.stdout + summary.stderr, /SECRET/);
+  const raw = await f.command(['rate-limits', '--json', ...allow]);
   assert.deepEqual(JSON.parse(raw.stdout), usage);
-  const started = await f.command(['resume', 'demo', '--detach', 'Continue']);
-  assert.equal(started.code, 0, started.stderr); assert.match(started.stderr, /server account differs/); assert.match(started.stderr, /at or near its limit/);
-  f.complete(); assert.equal((await f.command(['wait', 'demo'])).code, 0);
-  const healthy = await f.command(['serve', '--port', String(f.port)]);
+  const started = await f.command(['resume', 'demo', '--detach', ...allow, 'Continue']);
+  assert.equal(started.code, 0, started.stderr); assert.match(started.stderr, /bills old@example.test/); assert.match(started.stderr, /at or near its limit/);
+  f.complete(); assert.equal((await f.command(['wait', 'demo', ...allow])).code, 0);
+  const healthy = await f.command(['serve', ...allow]);
   assert.equal(JSON.parse(healthy.stdout).identityCheck, 'mismatch');
-  assert.match(healthy.stderr, /server account differs/);
+  assert.match(healthy.stderr, /bills old@example.test/);
+});
+
+test('worker commands stay on the recorded port and reject a changed account even with opt-in', async t => {
+  let serving = 'initial';
+  const email = 'same@example.test';
+  const f = await fixture(t, {
+    account: { account: { type: 'chatgpt', email, planType: 'pro' } },
+    usage: () => ({ accountId: serving }),
+  });
+  const other = await fixture(t, {
+    account: { account: { type: 'chatgpt', email, planType: 'pro' } },
+    usage: { accountId: 'initial' },
+  });
+  writeLogin(join(f.home, 'codex'), email, 'initial');
+  writeFileSync(join(f.home, `server-${other.port}.json`), JSON.stringify({ port: other.port }));
+  const adopted = await f.command(['adopt', 'demo']);
+  assert.equal(adopted.code, 0, adopted.stderr);
+  assert.equal(JSON.parse(readFileSync(join(f.home, 'threads/demo.json'))).account.accountId, 'initial');
+  for (const command of ['status', 'wait', 'result']) {
+    const result = await f.command([command, 'demo']);
+    assert.equal(result.code, 0, result.stderr);
+  }
+  assert.equal(other.received.length, 0, 'a recorded worker needs no server discovery');
+  const listing = await f.command(['status']);
+  assert.match(listing.stdout, /ACCOUNT/);
+  assert.match(listing.stdout, /same@example\.test \/ initial/);
+  writeLogin(join(f.home, 'codex'), email, 'switched');
+  const blocked = await f.command(['status', 'demo']);
+  assert.equal(blocked.code, 1);
+  assert.match(blocked.stderr, /has account .*initial.*active login.*switched.*--allow-other-account/);
+  const port = ['--port', String(f.port)];
+  assert.equal((await f.command(['status', 'demo', ...port])).code, 1);
+  const override = await f.command(['status', 'demo', ...port, '--allow-other-account']);
+  assert.equal(override.code, 0, override.stderr);
+  assert.match(override.stderr, /bills .*initial/);
+  assert.match((await f.command(['status', 'demo', '--allow-other-account'])).stderr, /requires --port/);
+
+  serving = 'switched';
+  f.received.length = 0;
+  for (const args of [
+    ['status', 'demo'], ['wait', 'demo'], ['result', 'demo'], ['resume', 'demo', 'Again'],
+    ['steer', 'demo', 'Stop'], ['interrupt', 'demo'],
+  ]) {
+    const result = await f.command([...args, ...port, '--allow-other-account']);
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /Saved server.*initial.*reports.*switched.*Threads cannot move between accounts/);
+    assert.equal(result.stderr.trim().split('\n').length, 1);
+  }
+  assert.ok(!f.received.some(({ method }) => method.startsWith('thread/') || method.startsWith('turn/')));
 });
 
 test('status defaults to compact table; JSON, filters, unavailable servers and single-name compatibility', async t => {

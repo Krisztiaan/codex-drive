@@ -8,8 +8,9 @@ import { RequestBroker, pendingRequests } from './requests.mjs';
 import { textInput, turnParams } from './params.mjs';
 import { validateCall } from './protocol.mjs';
 import { exitCode, failureDetails } from './failures.mjs';
-import { connection, journal, lifecycleEvent } from './client.mjs';
-import { accountHealth } from './account.mjs';
+import { checkedConnection, journal, lifecycleEvent } from './client.mjs';
+import { checkServerAccount, threadPort, threadUnavailable, usageWarning } from './account.mjs';
+import { routePort } from './server.mjs';
 import { steersFor } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 import { recordCompletion } from './outbox.mjs';
@@ -19,10 +20,6 @@ export const terminal = status => ['completed', 'failed', 'interrupted', 'idle']
 export function findState(store, key) {
   const all = store.all();
   return all.find(state => state.threadId === key) ?? all.find(state => state.name === key) ?? null;
-}
-export function portFor(options, state) {
-  if (state && options.port && +options.port !== state.port) throw new Error('Port differs from thread server');
-  return state?.port ?? Number(options.port ?? 4700);
 }
 export function statusView(store, state) {
   const { turnNotifications, ...view } = state;
@@ -92,8 +89,8 @@ async function recoveryParams(rpc, state, turn, signal) {
   try { message = (await agentMessage(rpc, state.threadId, state.turnId, signal))?.text ?? null; } catch { /* The status is still worth recording. */ }
   return { ...params, error: state.error ?? null, message, completedAt: turn?.completedAt ?? null };
 }
-export function warning(state) {
-  if (state.sandbox === 'danger-full-access' || state.sandboxPolicy?.type === 'dangerFullAccess') console.error(`WARNING: danger-full-access; approval=${typeof state.approval === 'string' ? state.approval : JSON.stringify(state.approvalPolicy)}. Codex can modify files and run commands without sandbox protection.`);
+function warnSandbox(state, report) {
+  if (state.sandbox === 'danger-full-access' || state.sandboxPolicy?.type === 'dangerFullAccess') report(`WARNING: danger-full-access; approval=${typeof state.approval === 'string' ? state.approval : JSON.stringify(state.approvalPolicy)}. Codex can modify files and run commands without sandbox protection.`);
 }
 export function effectiveState(state, result) {
   for (const key of ['cwd', 'model']) if (result[key] !== undefined) state[key] = result[key];
@@ -119,10 +116,9 @@ export function attachedDefaults(options, state, prompt, command) {
   }
   return { thread, turn };
 }
-export async function runAttached(store, command, options, key, prompt, readyCallback) {
+export async function runAttached(store, command, options, key, prompt, { ready: readyCallback, diagnostic } = {}) {
   let state = command === 'start' ? null : findState(store, key);
   if (state && options.name && options.name !== state.name) throw new Error('This thread already has local state; --name cannot rename its alias');
-  const port = portFor(options, state);
   const threadMethod = command === 'start' ? 'thread/start' : 'thread/resume';
   const base = attachedDefaults(options, state, prompt, command);
   const prepared = turnParams(threadMethod, options, { ...(state ? { threadId: state.threadId } : command !== 'start' ? { threadId: key } : {}), ...base.thread }, { ...base.turn }, { threadOnly: ['adopt', 'attach'].includes(command) });
@@ -131,6 +127,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   // Validate the whole turn before creating a thread or resuming it.
   if (prepared.turn.threadId !== undefined && prepared.turn.threadId !== state?.threadId) throw new Error('turn.threadId must match the addressed thread; use call for raw requests');
   validateCall('turn/start', { ...prepared.turn, threadId: state?.threadId ?? key });
+  const port = await routePort(options, state);
   const controller = new AbortController();
   const onSignal = signal => {
     const error = Object.assign(new Error(`Attached logger stopped by ${signal}; inspect status for the turn`), { exitCode: signal === 'SIGINT' ? 130 : 143 });
@@ -146,6 +143,23 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   let ownedTurnId, announceTurnId;
   const completedAt = new Map(); // Server completion time per turn, for the outbox entry.
   let rpc, shuttingDown = false, reconnecting = false, ready = false, recoveryTask = Promise.resolve();
+  let billingReported = false;
+  const report = message => {
+    console.error(message);
+    diagnostic?.(message);
+  };
+  async function verify(client, readUsage = false) {
+    const health = await checkServerAccount(client, options, state, {
+      signal: controller.signal, readUsage, report: message => {
+        if (!billingReported) { report(message); billingReported = true; }
+      },
+    });
+    if (readUsage) {
+      const warning = usageWarning(health);
+      if (warning) report(warning);
+    }
+    return health.identity;
+  }
   const owner = process.env.CLAUDE_CODE_SESSION_ID?.trim() || null;
   const quiet = Boolean(options.quiet);
   function registerTurn() {
@@ -191,6 +205,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
           try {
             await delay(reconnectDelay(), undefined, { signal: controller.signal }); if (shuttingDown) return;
             next = new Rpc(port); rpc = next; wire(next); await next.connect(controller.signal);
+            await verify(next);
             await next.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal });
             const recovered = await snapshot(next, state, controller.signal, ownedTurnId);
             if (completedTime(recovered)) completedAt.set(recovered.id, completedTime(recovered));
@@ -199,9 +214,10 @@ export async function runAttached(store, command, options, key, prompt, readyCal
             if (next.socket.readyState !== WebSocket.OPEN) throw new Error('Recovery socket closed');
             log({ method: 'driver/reconnected', params: record });
             store.save(state); reconnecting = false; if (terminal(state.status)) resolveDone(); return;
-          } catch (error) { next?.close(); last = error; }
+          } catch (error) { next?.close(); last = error; if (error.accountRouting) break; }
         }
-        reconnecting = false; if (!shuttingDown) rejectDone(new Error(`Reconnect failed; turn may still be running: ${last?.message}`));
+        reconnecting = false;
+        if (!shuttingDown) rejectDone(last?.accountRouting ? last : new Error(`Reconnect failed; turn may still be running: ${last?.message}`));
       })().catch(rejectDone);
     });
   }
@@ -217,6 +233,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       for (let attempt = 0; attempt < 15; attempt++) {
         try {
           await delay(reconnectDelay(), undefined, { signal: controller.signal }); rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
+          await verify(rpc);
           await rpc.request('thread/resume', { threadId: state.threadId, excludeTurns: prepared.thread.excludeTurns ?? true }, { signal: controller.signal });
           const latest = await snapshot(rpc, state, controller.signal);
           if (state.turnId && state.turnId !== priorTurnId) {
@@ -227,7 +244,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
             log({ method: 'driver/startRecovered', params: await recoveryParams(rpc, state, latest, controller.signal) });
           }
           break;
-        } catch (error) { rpc.close(); if (controller.signal.aborted) throw error; }
+        } catch (error) { rpc.close(); if (controller.signal.aborted || error.accountRouting) throw error; }
       }
       if (!recovered) throw new Error(`turn/start outcome unconfirmed; input was not replayed. Inspect status before retrying: ${error.message}`);
     }
@@ -249,9 +266,12 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   try {
     if (command === 'start' && options.name && findState(store, options.name)) throw new Error(`Thread name already exists: ${options.name}`);
     releaseServer = new Store(join(store.home, 'servers')).lock(String(port));
-    await broker.start(); warning({ ...state, ...prepared.thread, approval: prepared.thread.approvalPolicy ?? state?.approval, sandboxPolicy: prepared.turn.sandboxPolicy });
-    rpc = new Rpc(port); wire(rpc); await rpc.connect(controller.signal);
-    if (['start', 'resume'].includes(command)) await accountHealth(rpc, { warnUsage: true });
+    await broker.start();
+    rpc = new Rpc(port); wire(rpc);
+    try { await rpc.connect(controller.signal); }
+    catch (error) { if (state && !controller.signal.aborted) throw threadUnavailable(state); throw error; }
+    const account = await verify(rpc, ['start', 'resume'].includes(command));
+    warnSandbox({ ...state, ...prepared.thread, approval: prepared.thread.approvalPolicy ?? state?.approval, sandboxPolicy: prepared.turn.sandboxPolicy ?? state?.sandboxPolicy }, report);
     const result = await rpc.request(threadMethod, prepared.thread, { signal: controller.signal });
     const thread = result.thread;
     if (state && thread.id !== state.threadId) throw new Error('Resume returned a different thread; use adopt or call');
@@ -259,10 +279,11 @@ export async function runAttached(store, command, options, key, prompt, readyCal
       state = { name: options.name ?? null, threadId: thread.id, turnId: null, cwd: result.cwd ?? thread.cwd ?? prepared.thread.cwd,
         model: result.model ?? prepared.thread.model, effort: prepared.turn.effort ?? result.reasoningEffort ?? null,
         sandbox: prepared.thread.sandbox ?? DEFAULT_PERMISSIONS.sandbox, approval: prepared.thread.approvalPolicy ?? result.approvalPolicy ?? DEFAULT_PERMISSIONS.approval,
-        addDirs: options['add-dir'] ?? [], logPath, port, status: 'idle', lastEventTime: null, lastAgentMessage: null };
+        addDirs: options['add-dir'] ?? [], logPath, port, account, status: 'idle', lastEventTime: null, lastAgentMessage: null };
       if (!options.name) { const canonicalUnlock = store.lock(state.threadId); unlock(); unlock = canonicalUnlock; }
       store.create(state);
     }
+    state.account ??= account;
     broker.threadId = state.threadId;
     state.logPath = logPath; state.requestPolicy = options['request-policy'] ?? state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy;
     for (const k of ['cwd', 'model', 'sandbox']) if (prepared.thread[k] !== undefined) state[k] = prepared.thread[k];
@@ -307,7 +328,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
         break;
       }
       releaseServer = new Store(join(store.home, 'servers')).lock(String(port));
-      await accountHealth(rpc, { warnUsage: true });
+      await verify(rpc, true);
       ready = false; done = newDone();
       await startTurn({ ...prepared.turn, threadId: state.threadId, input: textInput('Continue from where you stopped.') });
       ready = true; for (const event of buffered.splice(0)) reduce(event); store.save(state);
@@ -323,7 +344,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   }
 }
 export async function waitForTurn(store, options, key, report = value => console.log(JSON.stringify(value)), externalSignal) {
-  const state = store.read(key); portFor(options, state);
+  const state = store.read(key), port = threadPort(options, state);
   state.lastAgentMessage = null;
   const completions = new Map();
   const rememberFailure = known => {
@@ -352,11 +373,13 @@ export async function waitForTurn(store, options, key, report = value => console
     pendingWake = false;
   };
   try {
-    let targetTurnId, failures = 0, interval = 1000, nextSnapshot = 0;
+    let targetTurnId, failures = 0, interval = 1000, nextSnapshot = 0, connected = false;
     for (;;) {
       try {
         if (!rpc) {
-          rpc = await connection(state.port, controller.signal, { observer: true, threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
+          rpc = await checkedConnection(port, options, state, controller.signal, { observer: true, threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy }, { recovering: connected });
+          connected = true;
+          state.account ??= rpc.accountHealth.identity;
           rpc.on('event', event => {
             if (event.params?.threadId && event.params.threadId !== state.threadId) return;
             const eventTurnId = event.params?.turnId ?? event.params?.turn?.id;
@@ -398,7 +421,7 @@ export async function waitForTurn(store, options, key, report = value => console
         if (rpc.socket.readyState !== WebSocket.OPEN) throw new Error('Wait socket closed');
         await waitUntil(nextSnapshot);
       } catch (error) {
-        if (controller.signal.aborted || error.rpcError || !error.requestTimeout && rpc?.socket.readyState === WebSocket.OPEN) throw error;
+        if (controller.signal.aborted || error.accountRouting || error.rpcError || !error.requestTimeout && rpc?.socket.readyState === WebSocket.OPEN) throw error;
         await rpc?.close(); rpc = null; if (++failures > 15) throw error;
         await delay(reconnectDelay(), undefined, { signal: controller.signal });
       }

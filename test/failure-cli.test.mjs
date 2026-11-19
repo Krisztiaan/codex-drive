@@ -138,6 +138,7 @@ test('wait retains a completion across reconnect when the resumed snapshot loses
     return value;
   });
   const previous = process.env.CODEX_DRIVE_HOME; process.env.CODEX_DRIVE_HOME = f.home;
+  f.useLogin();
   const controller = new AbortController();
   const waiter = waitForTurn(new Store(f.home), { timeout: '3' }, 'demo', value => { result = value; }, controller.signal);
   waiter.catch(() => {});

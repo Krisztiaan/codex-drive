@@ -21,10 +21,11 @@ The installer symlinks `~/.local/bin/codex-drive` to this checkout's executable 
 
 ```sh
 codex-drive methods
-codex-drive call configRequirements/read null --port 4800
-codex-drive call model/list '{"limit":10,"includeHidden":true}' --port 4800
-codex-drive call thread/read @read-params.json --port 4800
-printf '%s\n' '{"threadId":"UUID"}' | codex-drive call thread/read - --port 4800
+codex-drive serve
+codex-drive call configRequirements/read null
+codex-drive call model/list '{"limit":10,"includeHidden":true}'
+codex-drive call thread/read @read-params.json
+printf '%s\n' '{"threadId":"UUID"}' | codex-drive call thread/read -
 ```
 
 `methods` lists all generated client request names. `call <method> [params-json|@file|-]` validates the exact JSON type and fields, sends the request, prints the result JSON and exits. Omitted parameters default to `{}`, or `null` for a null-only parameter type. `--param key=<json>` adds or replaces a top-level parameter. Unknown methods, misspelled struct fields and invalid values fail clearly; explicit maps such as `config`, output schemas and metadata remain open. Semantic restrictions described by the protocol but not encoded in JSON Schema remain server checks. Protocol errors print the full original error object, including `data`, to stderr and exit 1. Transport failures never replay a mutation. `call initialize` uses the supplied initialization parameters for its single handshake.
@@ -42,15 +43,15 @@ Small aliases forward **every** parameter of their mapped request via `--param`.
 | `compact <name|id>` | `thread/compact/start` |
 | `name <name|id> <server-name>` | `thread/name/set` |
 | `models` | `model/list` |
-| `account` / `rate-limits` | `account/read` / `account/rateLimits/read` |
+| `rate-limits` | `account/rateLimits/read` |
 
 Rollback changes conversation history; it does not revert files. Server names and local driver aliases are separate; --name assigns an alias only when local state is first created. Pagination and filters are passed through, rather than fetched automatically. The server defaults `thread/list` to interactive sources: include `exec` explicitly to discover exec histories, for example `list --param 'sourceKinds=["cli","exec","appServer"]'`. Account usage, realtime, tools, queues, configuration, filesystem, process and other APIs remain available through `call`; they need no dedicated wrappers.
 
 ## Turns and sessions
 
 ```sh
-codex-drive serve --port 4800
-codex-drive start --port 4800 --cwd /path/to/project --model gpt-6.1-sol --effort low \
+codex-drive serve
+codex-drive start --cwd /path/to/project --model gpt-6.1-sol --effort low \
   --name goal --log /path/to/goal.jsonl --detach "Implement the task"
 codex-drive status goal
 codex-drive steer goal "Stop after the current check and report"
@@ -64,8 +65,8 @@ codex-drive interrupt goal
 `resume <name|threadId> "text"` composes `thread/resume` and a new `turn/start`, rejecting an already-running turn. Without text or raw input it attaches to the existing turn. Internal resumes default to `excludeTurns:true`; explicit `--thread-params` or `--param excludeTurns=false` overrides still win, and raw `call thread/resume` remains unchanged. Saved per-thread sandbox, approval and request-policy settings remain in effect unless explicitly overridden. A thread ID without local state is adopted during resume and uses the same defaults as start. `adopt` (also spelled `attach`) loads an existing thread using `thread/resume`, persists local state, refreshes its current turn and logs it until it ends. Adopted threads support status, wait, steer, interrupt and resume like native threads. Exec and TUI histories must be in the app-server's `CODEX_HOME`; this loads persisted history into that runtime, and does not take over a turn running in a separate exec/TUI process. Finish that external turn before continuing it through this server.
 
 ```sh
-codex-drive list --port 4800 --param 'sourceKinds=["exec","cli"]'
-codex-drive adopt THREAD_ID --port 4800 --name imported --detach
+codex-drive list --param 'sourceKinds=["exec","cli"]'
+codex-drive adopt THREAD_ID --name imported --detach
 codex-drive resume imported --detach "Continue this history"
 codex-drive fork imported --name branch
 codex-drive resume branch --detach "Explore the alternative"
@@ -76,7 +77,7 @@ codex-drive resume branch --detach "Explore the alternative"
 Start/resume support the **entire** `thread/start`, `thread/resume` and `turn/start` parameter surfaces:
 
 ```sh
-codex-drive start --port 4800 --detach --name structured \
+codex-drive start --detach --name structured \
   --thread-params '{"developerInstructions":"Use the repository gates","config":{"features.web_search":false}}' \
   --param 'model="gpt-6.1-sol"' --param 'effort="low"' \
   --param 'turn.outputSchema={"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}' \
@@ -85,7 +86,7 @@ codex-drive start --port 4800 --detach --name structured \
 
 `--thread-params` and `--turn-params` take JSON, `@file` or `-` for stdin. Raw values override convenience defaults; repeated `--param` overrides those blobs. Unqualified keys route to every composed request whose generated parameter schema accepts them; use `thread.key` or `turn.key` to scope a value. `input` can be supplied as protocol JSON instead of a text prompt. This covers images, skills, instructions, provider/configuration overrides, service tiers, reasoning, permission profiles and output schemas without adding flags for each field. Addressed thread identity is pinned in turn compositions; use `call` for a raw request. JSON is validated before creating/resuming a thread. Use `--` before a text prompt beginning with dashes. Adopting accepts thread-resume parameters; fork accepts thread-fork parameters via `--thread-params` or `--param`.
 
-Start, resume and adopt print one `{threadId,turnId}` object; adopt may have a null turn ID. They stay attached until the observed turn ends by default. `--detach` launches the same logger as a detached child, waits for accepted IDs and persisted state, prints those IDs and returns. The child writes events and diagnostics to the log. Startup failures fail the parent; later failures are read through status/wait. Optional `driverPid` is informational after completion. Stopping an attached logger closes its connection and does not issue `turn/interrupt`. Commands that address saved threads use their saved port; a conflicting explicit `--port` is rejected.
+Start, resume and adopt print one `{threadId,turnId}` object; adopt may have a null turn ID. They stay attached until the observed turn ends by default. `--detach` launches the same logger as a detached child, waits for accepted IDs and persisted state, prints those IDs and returns. The child writes events and diagnostics to the log. Startup failures fail the parent; later failures are read through status/wait. Optional `driverPid` is informational after completion. Stopping an attached logger closes its connection and does not issue `turn/interrupt`. Commands that address saved threads verify the recorded port and account. If the server is gone or changed accounts, restore the original account on the saved port. Threads cannot move between accounts. Older state gains an account binding when a logger successfully attaches.
 
 ## Events and server requests
 
@@ -107,7 +108,7 @@ The default `--request-policy approve` automatically answers command/file/permis
 
 ## Status, waiting and failures
 
-`status` without a name prints a compact table (name, status, model, cwd tail, event age, last message, quota remaining and owner). Use `--json` for the JSON array. Filters combine: `--active`, `--cwd /project` (path prefix with directory boundaries), `--since 24h`, `--name 'goal-*'` (shell-quoted glob with `*`/`?`), and `--owner <session-id>`. Durations accept positive s/m/h/d/w values. Unreachable servers produce an unavailable row with `refreshError` in JSON, allowing other sessions to remain visible. Active filtering uses refreshed status. Usage percentages are observed quota headroom, not permission to dispatch.
+`status` without a name prints a compact table (name, status, model, cwd tail, event age, last message, quota remaining, owner and account). Use `--json` for the JSON array. Filters combine: `--active`, `--cwd /project` (path prefix with directory boundaries), `--since 24h`, `--name 'goal-*'` (shell-quoted glob with `*`/`?`), and `--owner <session-id>`. Durations accept positive s/m/h/d/w values. Unreachable servers produce an unavailable row with `refreshError` in JSON, allowing other sessions to remain visible. Active filtering uses refreshed status. Usage percentages are observed quota headroom, not permission to dispatch.
 
 `status <name|threadId>` keeps its JSON object output and adds `steers`, with accepted steering text, turn ID and timestamp. Steering is stored in a separate per-thread journal under `CODEX_DRIVE_HOME/steers/` to avoid racing the attached state writer.
 
@@ -134,7 +135,7 @@ Timeout accepts positive fractional seconds and covers connections/RPCs. It leav
 
 ## Results and the completion inbox
 
-`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest turn, or of `--turn`. While the latest turn is still running it prints only the header (`name running turnId`) and exits 3; it never substitutes an older settled turn. Read an earlier turn with `--turn`. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). It reads the session's own log only when the server is unreachable or answers that it does not know the thread (`thread not found` or `no rollout found for thread id`); every other server error is reported. Log replay includes the logger's reconnect and recovery records, which carry the status, error, full final message and completion time found by the recovery snapshot. `--json` reports `source: "server"` or `"log"`. As in `wait`, a failure the logger saved for the same turn wins over a history snapshot that lost its error. A failed or interrupted turn still prints the message that exists.
+`result <name|threadId> [--turn <id>] [--json]` prints a header line, `name status turnId` plus the failure class for a failed turn, then the complete final agent message of the latest turn, or of `--turn`. While the latest turn is still running it prints only the header (`name running turnId`) and exits 3; it never substitutes an older settled turn. Read an earlier turn with `--turn`. It reads the app-server (`thread/turns/list`, then `thread/items/list` for that turn only). A stopped server produces a routing error. It reads the session's own log when the verified server answers that it does not know the thread (`thread not found` or `no rollout found for thread id`); every other server error is reported. Log replay includes the logger's reconnect and recovery records, which carry the status, error, full final message and completion time found by the recovery snapshot. `--json` reports `source: "server"` or `"log"`. As in `wait`, a failure the logger saved for the same turn wins over a history snapshot that lost its error. A failed or interrupted turn still prints the message that exists.
 
 | Exit | Meaning |
 | --- | --- |
@@ -158,7 +159,7 @@ Each recording prunes entries older than 14 days or beyond the newest 2,000 turn
 ## Orchestrator pattern
 
 ```sh
-codex-drive start --port 4800 --cwd /path/to/project --model gpt-6.1-sol --effort low \
+codex-drive start --cwd /path/to/project --model gpt-6.1-sol --effort low \
   --name task --detach --request-policy manual "Do the bounded work"
 codex-drive events task --follow > /tmp/task-events.jsonl &
 codex-drive status task
@@ -191,11 +192,13 @@ Pass `--quiet` to `start`, `resume` or `adopt` when the caller will collect the 
 
 ## Server ownership and persistence
 
-The WebSocket endpoint is always `ws://127.0.0.1:<port>`; start/serve default to 4700. `serve` starts a standalone app-server and returns its actual listener PID, or reuses an existing listener. `serve --stop --port PORT` refuses while any server-loaded thread has active status, including approval-waiting threads, listing local names or thread IDs (including threads without local state). Inspection uses metadata-only `thread/read includeTurns:false`; unreadable or unknown status also refuses shutdown. `serve --restart --port PORT` waits up to 30 seconds for idle, then stops and starts on the same port; `--timeout seconds` changes the idle-wait budget. `--force` on stop/restart explicitly permits interruption and lists affected sessions on stderr. Start/resume dispatch and restart share a driver-home/port lock; independent raw clients and other driver homes must coordinate their mutations. `serve --stop --port PORT` targets only that port's verified recorded listener/child and refuses replacement listeners. Startup is serialized within the driver home. Processes are never selected by name. The driver does not alter the shared Codex daemon or configuration. Set `CODEX_HOME` before serve to select the server's histories and authentication.
+The WebSocket endpoint is always `ws://127.0.0.1:<port>`. Run `codex-drive serve` after signing in. It reuses a known server for the active login or starts one on a free port and records the listener PID. Server records and saved workers in `CODEX_DRIVE_HOME` supply the known ports. To register a separately started server, run `codex-drive serve --port PORT` once.
 
-`serve` checks an existing server’s account against auth identity metadata on disk before reporting health. Start/resume also check before dispatch and warn for mismatches and usage at 90% or more, or when the backend disallows ordinary usage. Warnings do not block dispatch. Detached invocations display these warnings to their caller too. `account` and `rate-limits` print the account, plan, used percentages, reset times in local time and backend ordinary-usage permission (unknown when unavailable). Use `--json` for their original raw results, or `call account/read` / `call account/rateLimits/read`. Percentages and reset times never establish permission to retry.
+The active login comes from `CODEX_HOME/auth.json` (default `~/.codex/auth.json`). The driver reads identity fields only and compares them with the app-server's `account/read` and, when available, the account ID from its usage response. A saved or active account ID must match when known. Email can establish a match for a login or saved worker with only an email. If the server provides too little identity data to establish a match, default routing refuses it. The driver does not refresh tokens for detection.
 
-The checked-in schema exposes `account/read` (without an account ID), usage `accountId` when available, and `account/updated` with auth mode and plan only. It offers login/logout, but no reload-current-auth operation. The driver never logs in, logs out or refreshes tokens for detection. It compares account IDs from usage and auth metadata, falling back to email; unavailable identities are reported as `identityCheck: "unavailable"` by serve. New server metadata records its `CODEX_HOME`; legacy listeners use the caller’s `CODEX_HOME`, so run health checks with the same environment used to launch them. Identity comparisons cannot distinguish accounts when both ID and email are unavailable. Recover with an explicit idle restart, or start a second server on another port with the current auth.
+Use `codex-drive account` to see the active login and the account on each known port. Use `--json` for structured inventory or `--port PORT` to include an unregistered listener. `rate-limits --json` returns the raw usage response. To use a server outside the active login, pass both `--port PORT` and `--allow-other-account`. The CLI identifies the account it will bill. The override still requires a saved worker's account and port to match. Start and resume warn before dispatch when usage is at or near its limit. Detached starts report the billing and usage warnings to their caller.
+
+`serve --prune` and `serve --stop` without a port stop known servers on other accounts and report stopped and skipped ports. Running turns, including turns waiting for approval, prevent shutdown unless `--force` is supplied. An unreadable thread status prevents shutdown. `serve --stop --port PORT` explicitly targets one verified listener and refuses replacement listeners. `serve --restart` targets the active server by default and waits up to 30 seconds for idle. Use `--timeout` to set that budget. Start/resume and shutdown share a driver-home/port lock. Independent raw clients and other driver homes must coordinate their mutations.
 
 New servers run from the absolute driver state home, so deleting the caller's worktree does not break later configuration loading, resume or adoption. Keep that state home available for the server's lifetime. `serve` and `status` inspect existing listeners too, including older servers without saved cwd metadata. If a listener's working directory has disappeared, they warn on stderr with its port, PID and path; JSON output remains unchanged. They leave the server running. Restart it from a stable directory when its sessions can be safely resumed.
 

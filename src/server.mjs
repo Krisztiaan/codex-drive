@@ -1,10 +1,11 @@
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdirSync, openSync, closeSync, readFileSync, existsSync, unlinkSync, statSync } from 'node:fs';
+import { mkdirSync, openSync, closeSync, readFileSync, existsSync, unlinkSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { connection } from './client.mjs';
-import { accountHealth, codexHome } from './account.mjs';
+import { accountLabel, checkServerAccount, codexHome, compareAccounts, diskIdentity, hasIdentity, readServerAccount, routingError, threadPort } from './account.mjs';
+import { Rpc } from './rpc.mjs';
 import { Store, stateHome, atomicWrite } from './state.mjs';
 
 export function listening(port) {
@@ -49,28 +50,100 @@ function descendedFrom(pid, ancestor) {
   }
   return false;
 }
-export async function activeTurns(port) {
+export async function activeTurns(port, { otherThan, options } = {}) {
   const rpc = await connection(port);
   try {
-    const active = []; let cursor;
-    do {
-      const page = await rpc.request('thread/loaded/list', { ...(cursor ? { cursor } : {}) });
-      for (const id of page.data) {
-        const { thread } = await rpc.request('thread/read', { threadId: id, includeTurns: false });
-        if (!['idle', 'active'].includes(thread.status?.type)) throw new Error('Unknown or unreadable thread status: ' + id);
-        if (thread.status.type === 'active') active.push(id);
-      }
-      cursor = page.nextCursor;
-    } while (cursor);
-    const states = new Store().all();
-    return active.map(id => states.find(s => s.threadId === id)?.name ?? id);
+    if (otherThan) {
+      const { identity } = await readServerAccount(rpc, { readUsage: Boolean(otherThan.accountId) });
+      if (compareAccounts(otherThan, identity) !== 'mismatch') return { skipped: 'account is active or could not be verified', account: identity };
+      return { account: identity, active: await loadedTurns(rpc) };
+    }
+    if (options) await checkServerAccount(rpc, options);
+    return await loadedTurns(rpc);
   } finally { await rpc.close(); }
+}
+async function loadedTurns(rpc) {
+  const active = []; let cursor;
+  do {
+    const page = await rpc.request('thread/loaded/list', { ...(cursor ? { cursor } : {}) });
+    for (const id of page.data) {
+      const { thread } = await rpc.request('thread/read', { threadId: id, includeTurns: false });
+      if (!['idle', 'active'].includes(thread.status?.type)) throw new Error('Unknown or unreadable thread status: ' + id);
+      if (thread.status.type === 'active') active.push(id);
+    }
+    cursor = page.nextCursor;
+  } while (cursor);
+  const states = new Store().all();
+  return active.map(id => states.find(s => s.port === rpc.port && s.threadId === id)?.name ?? id);
+}
+export async function serverInventory(options = {}, active = diskIdentity()) {
+  const store = new Store();
+  const recorded = readdirSync(store.home).flatMap(file => {
+    const match = /^server-(\d+)\.json$/.exec(file);
+    return match ? [Number(match[1])] : [];
+  });
+  const ports = [...new Set([...recorded, ...store.all().map(s => s.port), ...(options.port ? [+options.port] : [])])]
+    .filter(port => Number.isInteger(port) && port > 0 && port <= 65535).sort((a, b) => a - b);
+  return Promise.all(ports.map(async port => {
+    const rpc = new Rpc(port);
+    const signal = AbortSignal.timeout(5000);
+    try {
+      await rpc.connect(signal);
+      const { identity, account, usage } = await readServerAccount(rpc, { signal, readUsage: Boolean(active.accountId || options.port || options.accountSummary) });
+      return { port, account: identity, identityCheck: compareAccounts(active, identity), plan: account.account?.planType, usage };
+    } catch { return { port, account: null, identityCheck: 'unavailable' }; }
+    finally { rpc.close(); }
+  }));
+}
+export async function routePort(options, state) {
+  const port = threadPort(options, state);
+  if (port != null) return port;
+  const active = diskIdentity();
+  if (!hasIdentity(active)) throw routingError('Active Codex login identity is unavailable. Run codex login, then codex-drive serve.');
+  const server = (await serverInventory({}, active)).find(server => server.identityCheck === 'matched');
+  if (!server) throw routingError(`No known server serves ${accountLabel(active)}. Run codex-drive serve.`);
+  return server.port;
+}
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(error => error ? reject(error) : resolve(port));
+    });
+  });
+}
+export async function manageServers(options) {
+  if (options.port) return serve(+options.port, options.stop, options);
+  const active = diskIdentity();
+  if (!hasIdentity(active)) throw routingError('Active Codex login identity is unavailable. Run codex login first.');
+  const home = resolve(stateHome());
+  const unlock = new Store(join(home, 'servers')).lock('selection');
+  try {
+    const servers = await serverInventory(options, active);
+    if (options.stop || options.prune) {
+      const stopped = [], skipped = [];
+      for (const { port, identityCheck, account } of servers) {
+        if (identityCheck !== 'mismatch') continue;
+        try {
+          const result = await serve(port, true, { ...options, otherThan: active });
+          if (result.skipped) skipped.push({ port, account: result.account, reason: result.skipped });
+          else if (result.stopped.length) stopped.push(result);
+        } catch (error) { skipped.push({ port, account, reason: error.message }); }
+      }
+      return { stopped, skipped };
+    }
+    const matching = servers.find(server => server.identityCheck === 'matched');
+    return await serve(matching?.port ?? await freePort(), false, options);
+  } finally { unlock(); }
 }
 export async function serve(port, stop = false, options = {}) {
   const home = resolve(stateHome()); mkdirSync(home, { recursive: true, mode: 0o700 });
   const path = join(home, `server-${port}.json`);
   const unlock = new Store(join(home, 'servers')).lock(String(port));
   try {
+    let stoppedAccount;
     if (stop || options.restart) {
       const initialPids = listenerPids(port);
       let inspected = false;
@@ -79,7 +152,10 @@ export async function serve(port, stop = false, options = {}) {
       if (initialPids.length || await listening(port)) {
         const deadline = Date.now() + Number(options.timeout ?? 30) * 1000;
         for (;;) {
-          const active = await activeTurns(port);
+          const inspection = await activeTurns(port, { otherThan: options.otherThan, options: options.restart ? options : undefined });
+          if (inspection.skipped) return { port, ...inspection };
+          stoppedAccount = inspection.account;
+          const active = inspection.active ?? inspection;
           if (!active.length) break;
           const message = `Active sessions on port ${port}: ${active.join(', ')}`;
           if (options.force) { console.error(`WARNING: forcing shutdown. ${message}; turns may be interrupted.`); break; }
@@ -94,13 +170,26 @@ export async function serve(port, stop = false, options = {}) {
       if (recorded && pids.some(pid => !descendedFrom(pid, recorded.pid))) throw new Error('Recorded pid differs from current listener; refusing to stop a replacement');
       // A stale recorded pid must never kill a recycled unrelated process.
       const targets = recorded ? pids.filter(pid => descendedFrom(pid, recorded.pid)) : pids;
+      if (targets.length && options.otherThan && compareAccounts(diskIdentity(), stoppedAccount) !== 'mismatch') {
+        return { port, account: stoppedAccount, skipped: 'account is active or could not be verified' };
+      }
       for (const pid of targets) process.kill(pid, 'SIGTERM');
       for (let i = 0; i < 50 && await listening(port); i++) await delay(100);
       if (await listening(port)) throw new Error('Listener did not stop after SIGTERM');
       if (existsSync(path)) unlinkSync(path);
-      if (!options.restart) return { port, stopped: targets };
+      if (!options.restart) return { port, ...(stoppedAccount ? { account: stoppedAccount } : {}), stopped: targets };
     }
-    if (await listening(port)) { warnServerDirectory(port); const rpc = await connection(port); try { const health = await accountHealth(rpc); return { port, alreadyListening: true, identityCheck: health.identityCheck }; } finally { await rpc.close(); } }
+    if (await listening(port)) {
+      const rpc = await connection(port);
+      try {
+        const { identity, identityCheck } = await checkServerAccount(rpc, options);
+        warnServerDirectory(port);
+        const [pid] = listenerPids(port);
+        if (pid && !existsSync(path)) atomicWrite(path, { port, pid, account: identity });
+        return { port, alreadyListening: true, account: identity, identityCheck };
+      } finally { await rpc.close(); }
+    }
+    if (!hasIdentity(diskIdentity())) throw routingError('Active Codex login identity is unavailable. Run codex login first.');
     const fd = openSync(join(home, `server-${port}.log`), 'a', 0o600);
     const child = spawn('codex', ['app-server', '--listen', `ws://127.0.0.1:${port}`], { cwd: home, detached: true, stdio: ['ignore', fd, fd] });
     closeSync(fd);
@@ -111,9 +200,19 @@ export async function serve(port, stop = false, options = {}) {
         const owned = listenerPids(port).filter(pid => descendedFrom(pid, child.pid));
         if (!owned.length) {
           if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, 'SIGTERM');
-          warnServerDirectory(port); return { port, alreadyListening: true };
+          throw new Error(`Port ${port} was taken during startup. Run serve again.`);
         }
-        atomicWrite(path, { pid: owned[0], launcherPid: child.pid, port, cwd: home, codexHome: codexHome() }); return { pid: owned[0], port };
+        try {
+          const rpc = await connection(port);
+          try {
+            const { identity, identityCheck } = await checkServerAccount(rpc, options);
+            atomicWrite(path, { pid: owned[0], launcherPid: child.pid, port, cwd: home, codexHome: codexHome(), account: identity });
+            return { pid: owned[0], port, account: identity, identityCheck };
+          } finally { await rpc.close(); }
+        } catch (error) {
+          if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, 'SIGTERM');
+          throw error;
+        }
       }
       if (child.exitCode !== null || child.signalCode !== null) break;
       await delay(100);

@@ -8,21 +8,21 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from './args.mjs';
 import { Store, applyEvent } from './state.mjs';
-import { serve, warnServerDirectory } from './server.mjs';
+import { manageServers, routePort, serverInventory, warnServerDirectory } from './server.mjs';
 import { methods, methodSchema, validateCall } from './protocol.mjs';
 import { readJson, callParams, textInput, turnParams } from './params.mjs';
-import { connection } from './client.mjs';
-import { accountHealth, usageText } from './account.mjs';
+import { checkedConnection } from './client.mjs';
+import { accountLabel, diskIdentity, threadPort, usageText } from './account.mjs';
 import { filterStates, table, recordSteer, pruneCandidates, pruneCalls, removeSession } from './views.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 import { pendingRequests, respond } from './requests.mjs';
 import { turnResult, resultText } from './results.mjs';
 import { inbox, follow } from './outbox.mjs';
-import { findState, portFor, snapshot, statusView, runAttached, waitForTurn, warning, effectiveState, attachedDefaults } from './turns.mjs';
+import { findState, snapshot, statusView, runAttached, waitForTurn, effectiveState } from './turns.mjs';
 
 const detachedWorker = typeof process.send === 'function';
 const print = value => console.log(JSON.stringify(value));
-const aliases = { list: 'thread/list', read: 'thread/read', archive: 'thread/archive', unarchive: 'thread/unarchive', rollback: 'thread/revert', compact: 'thread/compact/start', name: 'thread/name/set', models: 'model/list', account: 'account/read', 'rate-limits': 'account/rateLimits/read' };
+const aliases = { list: 'thread/list', read: 'thread/read', archive: 'thread/archive', unarchive: 'thread/unarchive', rollback: 'thread/revert', compact: 'thread/compact/start', name: 'thread/name/set', models: 'model/list', 'rate-limits': 'account/rateLimits/read' };
 function readable(event) {
   const p = event.params ?? {}, item = p.item;
   if (event.method === 'item/completed' && item?.type === 'agentMessage') return item.text;
@@ -80,13 +80,17 @@ async function detach(args) {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   const ids = await new Promise((resolve, reject) => {
     child.once('error', reject);
-    child.on('message', message => { if (message.ids) resolve(message.ids); else if (message.error) reject(new Error(message.error)); });
+    child.on('message', message => {
+      if (message.ids) resolve(message.ids);
+      else if (message.error) reject(new Error(message.error));
+      else if (message.diagnostic) console.error(message.diagnostic);
+    });
     child.once('exit', (code, signal) => reject(new Error(`Detached logger exited before starting (code ${code}, signal ${signal})`)));
   });
   child.unref(); print(ids);
 }
 const usage = `Usage: codex-drive <command>
-  serve [--port 4700] [--stop | --restart] [--force] [--timeout seconds]
+  serve [--port <port>] [--stop | --prune | --restart] [--force] [--timeout seconds]
   methods
   call <method> [<params-json>|@file|-] [--param key=<json>]
   start ["<prompt>"] [--cwd <dir>] [--model <m>] [--effort <e>] [--log <file>] [--name <n>] [--detach] [--quiet]
@@ -106,7 +110,8 @@ const usage = `Usage: codex-drive <command>
   interrupt <name|threadId> [--turn <turnId>]
   list | read <id> | archive <id> | unarchive <id> | rollback <id> | compact <id> | name <id> <name>
   models | account [--json] | rate-limits [--json]
-Server commands accept --port; saved threads use their saved port.
+Server commands default to the active Codex login. Saved threads use their recorded server.
+To use another account, specify both --port and --allow-other-account.
 Protocol calls and turn compositions accept --param key=<json>.
 Start/resume accept --thread-params <json>|@file|- and --turn-params <json>|@file|-.
 --param thread.key=<json> / turn.key=<json> explicitly scopes composed options.
@@ -120,8 +125,7 @@ Combined exit: 76 if any usage limit, otherwise largest observed exit code.
 Prune defaults to dry-run; --apply removes confirmed old terminal local sessions.
 Wait exits: completed 0, other/error 1, capacity 75, usage limit 76, interrupted 130, timeout 124.
 result prints a header line (name status turnId [failure class]) and the full final agent message of the
-latest turn or --turn; a turn still running prints the header only and exits 3. It reads the server, or the
-session log when the server is gone.
+latest turn or --turn; a turn still running prints the header only and exits 3.
 Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
 inbox prints one JSON line per settled turn (no message text) recorded by its logger, wait or result;
 --since takes 24h or an ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints,
@@ -132,17 +136,23 @@ async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
   if (command === 'methods') { print(methods()); return; }
-  if (command === 'serve') { print(await serve(Number(options.port ?? 4700), options.stop, options)); return; }
+  if (command === 'serve') { print(await manageServers(options)); return; }
+  if (command === 'account') {
+    const active = diskIdentity();
+    const servers = await serverInventory({ ...options, accountSummary: true }, active);
+    if (options.json) print({ active, servers });
+    else {
+      console.log(`Active login: ${accountLabel(active)}`);
+      for (const server of servers) {
+        console.log(`Port ${server.port}: ${accountLabel(server.account)} (${server.identityCheck})`);
+        if (server.usage) console.log(usageText({ account: { ...server.account, planType: server.plan } }, server.usage));
+      }
+    }
+    return;
+  }
   const store = new Store();
   if (options.detach) {
-    const workerArgs = detachedArgs(process.argv.slice(2));
-    const normalized = parseArgs(workerArgs).options;
-    const state = command === 'start' ? null : findState(store, positional[0]);
-    const base = attachedDefaults(normalized, state, undefined, command);
-    const prepared = turnParams(command === 'start' ? 'thread/start' : 'thread/resume', normalized, base.thread, base.turn, { threadOnly: ['adopt', 'attach'].includes(command) });
-    warning({ ...state, ...prepared.thread, approval: prepared.thread.approvalPolicy ?? state?.approval, sandboxPolicy: prepared.turn.sandboxPolicy ?? state?.sandboxPolicy });
-    if (['start', 'resume'].includes(command)) { const rpc = await connection(portFor(normalized, state)); try { await accountHealth(rpc, { warnUsage: true }); } finally { await rpc.close(); } }
-    await detach(workerArgs); return;
+    await detach(detachedArgs(process.argv.slice(2))); return;
   }
   if (['start', 'resume', 'adopt', 'attach'].includes(command)) {
     if (detachedWorker) {
@@ -152,7 +162,11 @@ async function main() {
       console.error = (...parts) => appendFileSync(logPath, JSON.stringify({ receivedAt: new Date().toISOString(), method: 'driver/diagnostic', params: { message: parts.join(' ') } }) + '\n', { mode: 0o600 });
     }
     const key = command === 'start' ? options.name ?? `pending-${process.pid}` : positional[0];
-    await runAttached(store, command, options, key, command === 'start' ? positional[0] : positional[1], detachedWorker ? ids => process.send({ ids }, () => process.disconnect()) : null); return;
+    const callbacks = detachedWorker ? {
+      ready: ids => process.send({ ids }, () => process.disconnect()),
+      diagnostic: diagnostic => { if (process.connected) process.send({ diagnostic }); },
+    } : {};
+    await runAttached(store, command, options, key, command === 'start' ? positional[0] : positional[1], callbacks); return;
   }
   if (command === 'pending') { print(pendingRequests(store.home, positional[0] ? findState(store, positional[0])?.threadId ?? positional[0] : undefined)); return; }
   if (command === 'respond') { const payload = readJson(positional[1]); print(await respond(store.home, positional[0], options.error ? undefined : payload, { error: options.error ? payload : undefined })); return; }
@@ -168,7 +182,7 @@ async function main() {
   if (command === 'wait') {
     if (positional.length === 1) { process.exitCode = await waitForTurn(store, options, positional[0]); return; }
     // Validate every identity before opening concurrent observers.
-    for (const key of positional) portFor(options, store.read(key));
+    for (const key of positional) threadPort(options, store.read(key));
     const cancel = new AbortController(), codes = [];
     setMaxListeners(0, cancel.signal);
     let winner = false, winnerCode;
@@ -199,7 +213,7 @@ async function main() {
         try {
           const saved = store.read(state.threadId);
           if (saved.turnId !== state.turnId || saved.lastEventTime !== state.lastEventTime || !['completed', 'failed', 'interrupted', 'idle'].includes(saved.status)) continue;
-          const rpc = await connection(portFor(options, saved));
+          const rpc = await checkedConnection(await routePort(options, saved), options, saved);
           try { await snapshot(rpc, saved); if (saved.status === 'running' || saved.turnId !== state.turnId) continue; removeSession(store, saved); }
           finally { await rpc.close(); }
         } finally { unlock(); }
@@ -217,18 +231,18 @@ async function main() {
   }
   if (command === 'status') {
     if (options.owner && positional.length) throw new Error('status --owner takes no worker name');
-    const states = positional.length ? [store.read(positional[0])] : filterStates(store.all(), { ...options, active: false }), results = [], inspected = new Set(), usageByPort = new Map();
-    if (!states.length) warnServerDirectory(Number(options.port ?? 4700));
+    const states = positional.length ? [store.read(positional[0])] : filterStates(store.all(), { ...options, active: false }), results = [], inspected = new Set();
+    if (!states.length && options.port) warnServerDirectory(Number(options.port));
     for (const state of states) {
-      const port = portFor(options, state);
-      if (!inspected.has(port)) { warnServerDirectory(port); inspected.add(port); }
       let rpc;
       try {
-        rpc = await connection(port, undefined, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy });
+        const port = await routePort(options, state);
+        rpc = await checkedConnection(port, options, state, undefined, { threadId: state.threadId, policy: state.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy }, { readUsage: true });
+        if (!inspected.has(port)) { warnServerDirectory(port); inspected.add(port); }
+        state.account ??= rpc.accountHealth.identity;
         rpc.on('event', event => applyEvent(state, event));
         await snapshot(rpc, state);
-        if (!usageByPort.has(port)) { try { usageByPort.set(port, await rpc.request('account/rateLimits/read', {})); } catch { usageByPort.set(port, null); } }
-        const usage = usageByPort.get(port);
+        const { usage } = rpc.accountHealth;
         if (usage?.rateLimits) state.rateLimits = usage.rateLimits;
         if (usage?.rateLimitsByLimitId) state.rateLimitsByLimitId = usage.rateLimitsByLimitId;
         results.push(statusView(store, state));
@@ -247,7 +261,6 @@ async function main() {
   }
   const state = command !== 'call' && positional[0] ? findState(store, positional[0]) : null;
   if (['steer', 'interrupt'].includes(command) && !state) throw new Error('Unknown thread; adopt it first');
-  const port = portFor(options, state);
   let method, params;
   if (command === 'call') {
     method = positional[0];
@@ -265,22 +278,22 @@ async function main() {
     validateCall(method, params);
     if (options.name && findState(store, options.name)) throw new Error(`Thread name already exists: ${options.name}`);
   }
-  const rpc = await connection(port, undefined, { policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId, ...(method === 'initialize' ? { initializeParams: params } : {}) });
+  const port = await routePort(options, state);
+  const rpc = await checkedConnection(port, options, state, undefined, { policy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy, threadId: state?.threadId, ...(method === 'initialize' ? { initializeParams: params } : {}) });
   try {
     if (method) {
       const result = method === 'initialize' ? rpc.initializeResult : await rpc.request(method, params);
       if (command === 'fork') {
         const thread = result.thread;
-        const forked = { ...state, name: options.name ?? null, threadId: thread.id, turnId: null, port, logPath: options.log ?? join(store.home, 'logs', thread.id + '.jsonl'),
+        const forked = { ...state, name: options.name ?? null, threadId: thread.id, turnId: null, port, account: rpc.accountHealth.identity, logPath: options.log ?? join(store.home, 'logs', thread.id + '.jsonl'),
           cwd: result.cwd ?? thread.cwd ?? state?.cwd, model: result.model ?? state?.model, effort: result.reasoningEffort ?? state?.effort ?? null,
           sandbox: params.sandbox ?? state?.sandbox ?? DEFAULT_PERMISSIONS.sandbox, approval: params.approvalPolicy ?? state?.approval ?? DEFAULT_PERMISSIONS.approval, addDirs: state?.addDirs ?? [],
           status: 'idle', lastAgentMessage: null, lastEventTime: null, error: null, failure: null, driverPid: null, sourceThreadId: params.threadId, requestPolicy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy };
         delete forked.turnNotifications;
         effectiveState(forked, result);
         await snapshot(rpc, forked); store.create(forked); print({ threadId: thread.id, turnId: forked.turnId });
-      } else if (['account', 'rate-limits'].includes(command) && !options.json) {
-        const health = await accountHealth(rpc);
-        console.log(usageText(command === 'account' ? result : health.account, command === 'rate-limits' ? result : health.usage));
+      } else if (command === 'rate-limits' && !options.json) {
+        console.log(usageText(rpc.accountHealth.account, result));
       } else print(result);
       return;
     }

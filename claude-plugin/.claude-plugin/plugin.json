@@ -1,6 +1,6 @@
 {
   "name": "codex-drive",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Session-owned Codex worker notifications and a project-wide /codex-workers overview.",
   "author": {
     "name": "Krisztiaan"

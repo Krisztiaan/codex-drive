@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { connection } from './client.mjs';
+import { checkedConnection } from './client.mjs';
 import { failureDetails } from './failures.mjs';
 import { turnNotification } from './state.mjs';
-import { findState, findTurn, agentMessage, portFor, recordQuietly } from './turns.mjs';
+import { findState, findTurn, agentMessage, recordQuietly } from './turns.mjs';
+import { threadPort } from './account.mjs';
 
 // Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
 const exits = { completed: 0, failed: 1, interrupted: 1 };
@@ -15,10 +16,8 @@ const reconcile = (state, turn) => turn && turn.id === state.turnId && state.sta
 
 // The app-server's errors for a thread it does not know; every other RPC error is reported as is.
 const missingThread = error => /^(thread not found|no rollout found for thread id)\b/i.test(error.rpcError?.message ?? '');
-// Unavailable means no server or a server without this thread.
 async function fromServer(options, state, port) {
-  let rpc;
-  try { rpc = await connection(port); } catch (error) { return { unavailable: error }; }
+  const rpc = await checkedConnection(port, options, state);
   try {
     let turn;
     try { turn = reconcile(state, await findTurn(rpc, state.threadId, options.turn)); } // The latest turn, or --turn.
@@ -54,7 +53,7 @@ function fromLog(options, state) {
 export async function turnResult(store, options, key) {
   const state = findState(store, key);
   if (!state) throw fail(`Unknown thread: ${key}`, 2);
-  const port = portFor(options, state);
+  const port = threadPort(options, state);
   let found = await fromServer(options, state, port);
   if (found.unavailable) {
     if (!state.logPath) throw found.unavailable;

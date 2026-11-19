@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { until } from '../test-support/app-server.mjs';
+import { until, writeLogin } from '../test-support/app-server.mjs';
 
 // The Codex executable is an external boundary. Keep the real subprocess,
 // listener, cwd deletion and CLI; replace only the protocol peer.
@@ -15,27 +15,40 @@ async function setup(t) {
   const home = join(run, 'state'), caller = join(run, 'worktree'), bin = join(run, 'bin');
   for (const dir of [home, caller, bin]) mkdirSync(dir);
   const peer = pathToFileURL(resolve('test-support/app-server.mjs')).href;
+  const login = pathToFileURL(resolve('src/account.mjs')).href;
   writeFileSync(join(bin, 'codex'), `#!${process.execPath}
 import { fixture } from ${JSON.stringify(peer)};
+import { diskIdentity } from ${JSON.stringify(login)};
 const cleanups = [];
 const port = Number(new URL(process.argv[process.argv.indexOf('--listen') + 1]).port);
-const f = await fixture({ after(fn) { cleanups.push(fn); } }, { historyFile: process.cwd() + '/history.json', port, diagnostics: () => ({ cwd: process.cwd() }) });
+const { email, accountId } = diskIdentity();
+const f = await fixture({ after(fn) { cleanups.push(fn); } }, { historyFile: process.cwd() + '/history-' + port + '.json', port,
+  account: { account: { email, type: 'chatgpt', planType: 'pro' } },
+  usage: { accountId, rateLimits: null }, diagnostics: () => ({ cwd: process.cwd() }) });
 process.once('SIGTERM', async () => { for (const history of f.threads.values()) for (const turn of history) if (turn.status === 'inProgress') turn.status = 'interrupted'; f.persist(); for (const cleanup of cleanups) await cleanup(); });
 `, { mode: 0o700 });
-  const env = { ...process.env, CODEX_DRIVE_HOME: home, PATH: bin + ':' + process.env.PATH };
+  const codexHome = join(run, 'codex');
+  writeLogin(codexHome);
+  const env = { ...process.env, CODEX_HOME: codexHome, CODEX_DRIVE_HOME: home, PATH: bin + ':' + process.env.PATH };
   const probe = createServer(); await new Promise(r => probe.listen(0, '127.0.0.1', r));
   const port = probe.address().port; await new Promise(r => probe.close(r)); assert.notEqual(port, 4700);
-  let serverStarted = false;
+  const startedPorts = new Set();
   async function command(args, cwd = run, driveHome = home) {
     const child = spawn(process.execPath, [resolve('src/cli.mjs'), ...args], { cwd, env: { ...env, CODEX_DRIVE_HOME: driveHome }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });
     const result = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve({ code, stdout, stderr })); });
-    if (args[0] === 'serve' && !args.includes('--stop') && result.code === 0 && JSON.parse(stdout).pid) serverStarted = true;
+    if (args[0] === 'serve' && result.code === 0) {
+      const server = JSON.parse(stdout);
+      if (server.pid) startedPorts.add(server.port);
+    }
     return result;
   }
-  t.after(async () => { if (serverStarted) await command(['serve', '--stop', '--port', String(port)]); rmSync(run, { recursive: true, force: true }); });
-  return { run, home, caller, bin, env, port, command };
+  t.after(async () => {
+    for (const port of startedPorts) await command(['serve', '--stop', '--force', '--port', String(port)]);
+    rmSync(run, { recursive: true, force: true });
+  });
+  return { run, home, caller, bin, env, port, command, codexHome };
 }
 
 test('serve survives deletion of its launching directory by using the stable state home', async t => {
@@ -118,4 +131,55 @@ test('wait reconnects through an owned server restart and resume keeps the saved
   assert.notEqual(JSON.parse(resumed.stdout).turnId, ids.turnId);
   assert.equal((await f.command(['interrupt', 'recover'])).code, 0);
   await until(() => !existsSync(join(f.home, 'threads/recover.json.lock')));
+});
+
+test('serve selects the active login and prune stops only idle servers from other accounts', async t => {
+  const f = await setup(t);
+  async function json(...args) {
+    const result = await f.command(args);
+    assert.equal(result.code, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  }
+  writeLogin(f.codexHome, 'same@example.test', 'working');
+  const working = await json('serve');
+  await json('start', '--name', 'working', '--detach', 'Work');
+  writeLogin(f.codexHome, 'same@example.test', 'idle');
+  const idle = await json('serve');
+  writeLogin(f.codexHome, 'same@example.test', 'current');
+  const refused = await f.command(['start', '--detach', 'Should not dispatch']);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /No known server serves .*current.*Run codex-drive serve/);
+  const current = await json('serve');
+  assert.equal(new Set([working.port, idle.port, current.port]).size, 3);
+  assert.equal((await json('serve')).port, current.port);
+  await json('start', '--name', 'current', '--detach', 'Work');
+  const saved = JSON.parse(readFileSync(join(f.home, 'threads/current.json'), 'utf8'));
+  assert.equal(saved.port, current.port);
+  assert.equal(saved.account.accountId, 'current');
+  const inventory = await json('account', '--json');
+  assert.equal(inventory.active.accountId, 'current');
+  assert.deepEqual(new Set(inventory.servers.map(s => s.account.accountId)), new Set(['working', 'idle', 'current']));
+
+  const pruned = await json('serve', '--prune');
+  assert.deepEqual(pruned.stopped.map(s => s.port), [idle.port]);
+  assert.deepEqual(pruned.skipped.map(s => s.port), [working.port]);
+  assert.match(pruned.skipped[0].reason, /Active sessions/);
+  const stop = await json('serve', '--stop');
+  assert.deepEqual(stop.stopped, []);
+  assert.deepEqual(stop.skipped.map(s => s.port), [working.port]);
+  const forced = await json('serve', '--prune', '--force');
+  assert.deepEqual(forced.stopped.map(s => s.port), [working.port]);
+  for (const args of [['status', 'working'], ['wait', 'working'], ['result', 'working'], ['interrupt', 'working']]) {
+    const gone = await f.command(args);
+    assert.equal(gone.code, 1);
+    assert.match(gone.stderr, /Cannot connect to the saved server.*Restore that server.*working/);
+    assert.equal(gone.stderr.trim().split('\n').length, 1);
+  }
+  assert.equal((await json('status', 'current')).account.accountId, 'current');
+  await json('interrupt', 'current');
+  const { existsSync } = await import('node:fs');
+  await until(() => !existsSync(join(f.home, 'threads/current.json.lock')));
+  const workingState = JSON.parse(readFileSync(join(f.home, 'threads/working.json'), 'utf8'));
+  try { process.kill(workingState.driverPid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+  await until(() => !existsSync(join(f.home, 'threads/working.json.lock')));
 });

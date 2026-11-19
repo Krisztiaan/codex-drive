@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { validateCall } from './protocol.mjs';
+import pkg from '../package.json' with { type: 'json' };
+
+export const clientInfo = { name: 'codex-drive', title: 'codex-drive', version: pkg.version };
 
 export class Rpc extends EventEmitter {
   constructor(port) { super(); this.port = port; this.nextId = 1; this.pending = new Map(); }
@@ -29,7 +32,7 @@ export class Rpc extends EventEmitter {
       this.emit('disconnect');
     });
     // Generated InitializeParams + ClientNotification; no JSON-RPC version field required.
-    this.initializeResult = await this.request('initialize', initializeParams ?? { clientInfo: { name: 'codex-drive', title: 'codex-drive', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } }, { signal });
+    this.initializeResult = await this.request('initialize', initializeParams ?? { clientInfo, capabilities: { experimentalApi: true, requestAttestation: false } }, { signal });
     this.send({ method: 'initialized' });
   }
   send(message) { if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('Connection is closed'); this.socket.send(JSON.stringify(message)); }

@@ -155,6 +155,7 @@ test('open-socket RPC timeout is retried by wait without replaying mutations', a
   const actual = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => actual(fn, ms === 30000 ? 20 : ms, ...args));
   const previous = process.env.CODEX_DRIVE_HOME; process.env.CODEX_DRIVE_HOME = f.home;
+  f.useLogin();
   try {
     assert.equal(await waitForTurn(new Store(f.home), {}, 'demo', () => {}), 0);
     assert.equal(reads, 2);
@@ -218,7 +219,8 @@ test('noisy logger events coalesce state writes and flush at completion', async 
   let saves = 0, ready;
   store.save = state => { saves++; return save(state); };
   const attached = new Promise(resolve => { ready = resolve; });
-  const task = runAttached(store, 'adopt', {}, 'demo', undefined, ready);
+  f.useLogin();
+  const task = runAttached(store, 'adopt', {}, 'demo', undefined, { ready });
   await attached;
   const before = saves;
   for (let n = 0; n < 100; n++) f.emit('item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', delta: 'x' });

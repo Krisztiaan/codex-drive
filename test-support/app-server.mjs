@@ -6,6 +6,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSyn
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
+export function writeLogin(home, email = 'fixture@example.test', accountId) {
+  mkdirSync(home, { recursive: true });
+  const claims = { email, 'https://api.openai.com/auth': { chatgpt_account_id: accountId } };
+  const id_token = 'x.' + Buffer.from(JSON.stringify(claims)).toString('base64url') + '.SECRET';
+  writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { id_token } }));
+}
+
 function frame(message) {
   const body = Buffer.from(JSON.stringify(message));
   const header = body.length < 126 ? Buffer.from([0x81, body.length]) : body.length <= 65535 ? Buffer.from([0x81, 126, body.length >> 8, body.length & 255]) : Buffer.alloc(10);
@@ -16,6 +23,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   mkdirSync('/tmp/codex-drive-proof', { recursive: true });
   const home = mkdtempSync('/tmp/codex-drive-proof/cli-unit-');
   mkdirSync(join(home, 'threads'));
+  writeLogin(join(home, 'codex'));
   const sockets = new Set(), children = new Set(), received = [], replies = [];
   const paused = new Set();
   const turns = [{ id: 'turn-1', status: 'completed', items: [{ type: 'agentMessage', id: 'message-1', text: 'PREVIOUS' }], error: null }];
@@ -83,7 +91,7 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
           case 'thread/resume': socket.subscribed = true; for (const event of resumeEvents) if (!socket.optOut?.includes(event.method)) socket.write(frame(event)); result = { thread: threadMetadata(params.threadId, params.includeTurns || method === 'thread/resume' && !params.excludeTurns) }; break;
           case 'thread/fork': { const id = `fork-${nextFork++}`; const history = structuredClone(threads.get(params.threadId) ?? turns); threads.set(id, history); result = { thread: { id, cwd: home, turns: history } }; break; }
           case 'model/list': result = { data: [], nextCursor: null }; break;
-          case 'account/read': result = typeof account === 'function' ? account() : account ?? { account: null, requiresOpenaiAuth: false }; break;
+          case 'account/read': result = typeof account === 'function' ? account() : account ?? { account: { type: 'chatgpt', email: 'fixture@example.test', planType: 'pro' }, requiresOpenaiAuth: true }; break;
           case 'account/rateLimits/read': result = typeof usage === 'function' ? usage() : usage ?? { rateLimits: null, rateLimitsByLimitId: null }; break;
           case 'thread/loaded/list': result = { data: [...threads.keys()], nextCursor: null }; break;
           case 'thread/list': result = { data: [...threads.keys()].map(id => ({ id })), nextCursor: null }; break;
@@ -170,7 +178,14 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
     await new Promise(resolve => server.close(resolve));
     rmSync(home, { recursive: true, force: true });
   });
-  return { requestCounts() {
+  return { useLogin() {
+    const previous = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = join(home, 'codex');
+    t.after(() => {
+      if (previous === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous;
+    });
+  }, requestCounts() {
     const counts = {};
     for (const m of received) {
       const key = m.method + ' / ' + (m.params?.itemsView ?? '-');

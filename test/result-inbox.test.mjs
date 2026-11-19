@@ -66,9 +66,9 @@ test('result exits 2 for an unknown name or turn and 3 while nothing has settled
   assert.equal(wrongPort.code, 1); assert.match(wrongPort.stderr, /Port differs/);
 });
 
-test('result reads a log-only session when its server is gone, including recovered completions', async t => {
-  const f = await fixture(t);
-  f.seed({ port: await closedPort(), status: 'running', turnId: 'turn-9' });
+test('result reads a log-only session when its server lacks the thread, including recovered completions', async t => {
+  const f = await fixture(t, { turnsListError: () => ({ code: -32600, message: 'Thread not found' }) });
+  f.seed({ status: 'running', turnId: 'turn-9' });
   const events = [
     { method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'turn-7', status: 'inProgress', items: [], error: null } } },
     { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-7', item: { type: 'agentMessage', id: 'a', text: 'Draft' } } },
@@ -93,8 +93,8 @@ test('result reads a log-only session when its server is gone, including recover
 });
 
 test('the log fallback treats a recovered or reconnected running turn as the latest turn', async t => {
-  const f = await fixture(t);
-  f.seed({ port: await closedPort(), status: 'running', turnId: 'turn-8' });
+  const f = await fixture(t, { turnsListError: () => ({ code: -32600, message: 'Thread not found' }) });
+  f.seed({ status: 'running', turnId: 'turn-8' });
   const settled = [
     { method: 'turn/started', params: { threadId: 'thread-1', turn: { id: 'turn-7', status: 'inProgress', items: [], error: null } } },
     { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-7', item: { type: 'agentMessage', id: 'a', text: 'Older' } } },
@@ -340,15 +340,15 @@ test('result falls back to the log only for a missing thread and reports other R
 });
 
 test('a completion recovered after a disconnect keeps its full message for a log-only result', async t => {
-  const f = await fixture(t);
+  let missing = false;
+  const f = await fixture(t, { turnsListError: () => missing ? { code: -32600, message: 'Thread not found' } : null });
   assert.equal((await f.command(['resume', 'demo', '--detach', 'Go'])).code, 0);
   const current = f.turns.at(-1);
   f.disconnect();
   f.complete('completed', 'RECOVERED\nfull answer', current);
   await until(() => JSON.parse(readFileSync(join(f.home, 'threads/demo.json'), 'utf8')).status === 'completed', 'recovered completion');
   await until(() => readCompletions(f.home).some(e => e.turnId === current.id), 'logger outbox entry');
-  const saved = JSON.parse(readFileSync(join(f.home, 'threads/demo.json'), 'utf8'));
-  writeFileSync(join(f.home, 'threads/demo.json'), JSON.stringify({ ...saved, port: await closedPort() })); // The server is gone.
+  missing = true;
   const result = await f.command(['result', 'demo', '--json']);
   assert.equal(result.code, 0, result.stderr);
   const json = JSON.parse(result.stdout);

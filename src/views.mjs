@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, lstatSync, statSync, realpathSync, readdirSync } from 'node:fs';
 import { join, resolve, sep, dirname, basename } from 'node:path';
 import { checkKey, turnNotification } from './state.mjs';
-import { quotas } from './account.mjs';
+import { accountLabel, quotas } from './account.mjs';
 
 export function duration(value) {
   const match = /^(\d+(?:\.\d+)?)(s|m|h|d|w)$/.exec(value ?? '');
@@ -33,13 +33,13 @@ export function filterStates(states, options, now = Date.now()) {
   return states.filter(s => (!options.active || s.status === 'running') && (!options.owner || turnNotification(s).owner === options.owner) && within(s.cwd) && (!cutoff || Date.parse(s.lastEventTime) >= cutoff) && (!glob || glob.test(s.name ?? s.threadId)));
 }
 export function table(states) {
-  const rows = [['NAME', 'STATUS', 'MODEL', 'CWD', 'EVENT AGE', 'LAST MESSAGE', 'USAGE LEFT', 'OWNER']];
+  const rows = [['NAME', 'STATUS', 'MODEL', 'CWD', 'EVENT AGE', 'LAST MESSAGE', 'USAGE LEFT', 'OWNER', 'ACCOUNT']];
   for (const s of states) {
     const used = quotas({ rateLimits: s.rateLimits, rateLimitsByLimitId: s.rateLimitsByLimitId }).flatMap(([id, q]) => ['primary', 'secondary'].filter(k => q[k]).map(k => `${id}/${k}: ${Math.max(0, 100 - q[k].usedPercent)}%`));
-    rows.push([s.name ?? s.threadId, s.refreshError ? 'unavailable' : s.status, s.model, s.cwd?.split(sep).slice(-2).join(sep), s.lastEventTime ? `${Math.max(0, Math.floor((Date.now() - Date.parse(s.lastEventTime)) / 1000))}s` : '-', s.lastAgentMessage, used.join(', ') || 'unknown', s.owner]);
+    rows.push([s.name ?? s.threadId, s.refreshError ? 'unavailable' : s.status, s.model, s.cwd?.split(sep).slice(-2).join(sep), s.lastEventTime ? `${Math.max(0, Math.floor((Date.now() - Date.parse(s.lastEventTime)) / 1000))}s` : '-', s.lastAgentMessage, used.join(', ') || 'unknown', s.owner, accountLabel(s.account)]);
   }
   const widths = [28, 13, 20, 28, 12, 55, 60, 36];
-  return rows.map(row => row.map((v, i) => clean(v).slice(0, widths[i]).padEnd(widths[i])).join('  ').trimEnd()).join('\n');
+  return rows.map(row => row.map((v, i) => i < widths.length ? clean(v).slice(0, widths[i]).padEnd(widths[i]) : clean(v)).join('  ').trimEnd()).join('\n');
 }
 function steerPath(store, state) { return join(store.home, 'steers', checkKey(state.threadId) + '.jsonl'); }
 export function steersFor(store, state) {

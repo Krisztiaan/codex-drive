@@ -1,9 +1,10 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { Rpc } from './rpc.mjs';
+import { clientInfo, Rpc } from './rpc.mjs';
 import { RequestBroker } from './requests.mjs';
 import { stateHome } from './state.mjs';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
+import { checkServerAccount, threadUnavailable } from './account.mjs';
 
 // Pure observers use completed items, never streaming text fragments or diffs.
 export const WAIT_NOTIFICATION_OPT_OUTS = Object.freeze([
@@ -47,9 +48,22 @@ export async function connection(port, signal, { log = () => {}, policy = DEFAUL
     catch (error) { rpc.emit('protocolError', error); closeSocket(); }
   });
   if (observer && !initializeParams) initializeParams = {
-    clientInfo: { name: 'codex-drive', title: 'codex-drive', version: '0.1.0' },
+    clientInfo,
     capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods: WAIT_NOTIFICATION_OPT_OUTS },
   };
   try { await rpc.connect(signal, initializeParams); return rpc; }
   catch (error) { await rpc.close(); throw error; }
+}
+
+export async function checkedConnection(port, options, state, signal, settings, { readUsage, recovering } = {}) {
+  let rpc;
+  try { rpc = await connection(port, signal, settings); }
+  catch (error) {
+    if (state && !recovering && !signal?.aborted) throw threadUnavailable(state);
+    throw error;
+  }
+  try {
+    rpc.accountHealth = await checkServerAccount(rpc, options, state, { signal, readUsage });
+    return rpc;
+  } catch (error) { await rpc.close(); throw error; }
 }

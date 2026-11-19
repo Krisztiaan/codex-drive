@@ -96,6 +96,9 @@ Set these in the environment Claude Code starts with:
   test on Claude Code 2.1.325, a monitor line started a turn in an idle interactive session with no user message.
   See [Verification](#verification).
 - **Existing workers.** Older records without an owner remain visible in the manual views.
+- **Codex accounts.** Worker commands use the current Codex login and each worker's saved server.
+  Use `codex-drive account` after switching logins to see which servers belong to each account.
+  Completion entries remain in the inbox if the original account or server is unavailable.
 
 ## Documentation used
 
