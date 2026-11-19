@@ -118,7 +118,7 @@ test('a detached logger records the completion with no client waiting, without m
   const ids = JSON.parse(started.stdout);
   f.complete('completed', 'SECRET-TOKEN in the final answer');
   const [done] = await until(() => readCompletions(f.home).length && readCompletions(f.home), 'outbox entry');
-  assert.deepEqual(Object.keys(done).sort(), ['cwd', 'exitCode', 'failure', 'finishedAt', 'name', 'status', 'threadId', 'turnId']);
+  assert.deepEqual(Object.keys(done).sort(), ['cwd', 'exitCode', 'failure', 'finishedAt', 'name', 'owner', 'quiet', 'status', 'threadId', 'turnId']);
   assert.equal(done.name, 'bg'); assert.equal(done.threadId, ids.threadId); assert.equal(done.turnId, ids.turnId);
   assert.equal(done.status, 'completed'); assert.equal(done.exitCode, 0); assert.equal(done.failure, null);
   assert.ok(!Number.isNaN(Date.parse(done.finishedAt)));
@@ -139,6 +139,36 @@ test('adopting an already finished turn does not announce it', async t => {
   const adopted = await f.command(['adopt', 'demo']);
   assert.equal(adopted.code, 0, adopted.stderr);
   assert.deepEqual(files(f.home), []);
+});
+
+test('adopt owns a running turn, and a later resume by a different session preserves historical ownership', async t => {
+  const f = await fixture(t);
+  const session = id => ({ env: { CLAUDE_CODE_SESSION_ID: id } });
+  f.turns[0].status = 'inProgress';
+  const adopted = await f.command(['adopt', 'demo', '--detach'], session('adopter'));
+  assert.equal(adopted.code, 0, adopted.stderr);
+  const status = await f.command(['status', 'demo']);
+  assert.equal(JSON.parse(status.stdout).owner, 'adopter');
+  f.complete('completed', 'First');
+  await until(() => readCompletions(f.home).some(e => e.owner === 'adopter'), 'adoption completion');
+  await until(() => !readdirSync(join(f.home, 'threads')).includes('demo.json.lock'), 'adopt writer exited');
+  const resumed = await f.command(['resume', 'demo', '--detach', 'Next'], session('resumer'));
+  assert.equal(resumed.code, 0, resumed.stderr);
+  const next = JSON.parse(resumed.stdout).turnId;
+  f.complete('completed', 'Second');
+  await until(() => readCompletions(f.home).some(e => e.turnId === next), 'resumed completion');
+
+  // Rebuild a missing older entry from the saved turn metadata after the newer turn has taken ownership.
+  rmSync(join(outboxDir(f.home), 'thread-1@turn-1.json'));
+  const result = await f.command(['result', 'demo', '--turn', 'turn-1', '--json'], session('resumer'));
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).owner, 'adopter');
+  assert.equal(readCompletions(f.home).find(e => e.turnId === 'turn-1').owner, 'adopter');
+  for (const [owner, turnId] of [['adopter', 'turn-1'], ['resumer', next]]) {
+    const owned = await f.command(['inbox', '--owner', owner]);
+    assert.equal(owned.code, 0, owned.stderr);
+    assert.deepEqual(lines(owned.stdout).map(e => e.turnId), [turnId]);
+  }
 });
 
 test('wait and result repair the entry of a logger that died', async t => {
@@ -360,14 +390,15 @@ test('inbox --cwd keeps entries from that directory and below, for listing, ackn
   assert.equal(listed.code, 0, listed.stderr);
   assert.deepEqual(lines(listed.stdout).map(e => e.turnId).sort(), ['turn-below', 'turn-here']);
   assert.deepEqual(lines((await f.command(['inbox', '--unread'])).stdout).map(e => e.turnId), ['turn-sibling'], 'only the printed entries were acknowledged');
-  const follower = f.launch(['inbox', '--follow', '--cwd', '/work/project/']);
-  await delay(200);
-  recordCompletion(f.home, turn('turn-later-sibling', { cwd: '/work/project-other' }));
-  recordCompletion(f.home, turn('turn-later', { cwd: '/work/project' }));
-  await until(() => follower.stdout().includes('turn-later'), 'followed project entry');
-  await delay(100);
+  recordCompletion(f.home, turn('turn-ready', { cwd: '/work/project' }));
+  const follower = f.launch(['inbox', '--follow', '--unread', '--cwd', '/work/project/']);
+  await until(() => follower.stdout().includes('"turn-ready"'), 'follower baseline');
+  const finishedAt = Date.now() - 1000;
+  recordCompletion(f.home, turn('turn-later-sibling', { cwd: '/work/project-other' }), { finishedAt });
+  recordCompletion(f.home, turn('turn-later', { cwd: '/work/project' }), { finishedAt: finishedAt + 1 });
+  await until(() => follower.stdout().includes('"turn-later"'), 'followed project entry');
   follower.child.kill('SIGTERM');
-  assert.deepEqual(lines(follower.stdout()).map(e => e.turnId), ['turn-later']);
+  assert.deepEqual(lines((await follower.result).stdout).map(e => e.turnId), ['turn-ready', 'turn-later']);
 });
 
 test('--cwd compares directories with symlinks resolved on both sides, including removed paths, at segment boundaries', t => {

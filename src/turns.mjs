@@ -3,7 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Rpc } from './rpc.mjs';
-import { Store, applyEvent } from './state.mjs';
+import { Store, applyEvent, turnNotification } from './state.mjs';
 import { RequestBroker, pendingRequests } from './requests.mjs';
 import { textInput, turnParams } from './params.mjs';
 import { validateCall } from './protocol.mjs';
@@ -25,7 +25,8 @@ export function portFor(options, state) {
   return state?.port ?? Number(options.port ?? 4700);
 }
 export function statusView(store, state) {
-  return { ...state, steers: steersFor(store, state), failure: state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null, pendingRequests: pendingRequests(store.home, state.threadId) };
+  const { turnNotifications, ...view } = state;
+  return { ...view, ...turnNotification(state), steers: steersFor(store, state), failure: state.status === 'failed' ? failureDetails(state.error, state.rateLimits) : null, pendingRequests: pendingRequests(store.home, state.threadId) };
 }
 // The latest turn, or the target turn, without items.
 export async function findTurn(rpc, threadId, targetTurnId, signal) {
@@ -145,6 +146,16 @@ export async function runAttached(store, command, options, key, prompt, readyCal
   let ownedTurnId, announceTurnId;
   const completedAt = new Map(); // Server completion time per turn, for the outbox entry.
   let rpc, shuttingDown = false, reconnecting = false, ready = false, recoveryTask = Promise.resolve();
+  const owner = process.env.CLAUDE_CODE_SESSION_ID?.trim() || null;
+  const quiet = Boolean(options.quiet);
+  function registerTurn() {
+    const existing = turnNotification(state);
+    // Attaching another logger to a running turn preserves its original owner.
+    if (existing.owner && existing.owner !== owner) return;
+    if (owner || quiet) {
+      state.turnNotifications = { ...state.turnNotifications, [state.turnId]: { owner, quiet: quiet || existing.quiet } };
+    }
+  }
   let resolveDone, rejectDone;
   const newDone = () => { const promise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; }); promise.catch(() => {}); return promise; };
   let done = newDone();
@@ -223,6 +234,7 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     if (state.turnId !== turn.id) state.lastAgentMessage = null;
     ownedTurnId = announceTurnId = turn.id;
     state.turnId = turn.id; state.status = turn.status === 'inProgress' ? 'running' : turn.status; state.error = turn.error;
+    registerTurn();
     for (const key of ['cwd', 'model', 'effort']) if (params[key] !== undefined) state[key] = params[key];
     if (params.approvalPolicy !== undefined) state.approval = params.approvalPolicy;
     if (params.sandboxPolicy !== undefined && params.sandboxPolicy !== null) effectiveState(state, { sandbox: params.sandboxPolicy });
@@ -258,9 +270,16 @@ export async function runAttached(store, command, options, key, prompt, readyCal
     if (prepared.turn.effort !== undefined) state.effort = prepared.turn.effort;
     if (options['add-dir']) state.addDirs = options['add-dir'];
     effectiveState(state, result);
-    if (command !== 'start') { await snapshot(rpc, state, controller.signal); ownedTurnId = state.turnId; if (state.status === 'running') announceTurnId = state.turnId; }
+    if (command !== 'start') {
+      await snapshot(rpc, state, controller.signal);
+      ownedTurnId = state.turnId;
+      if (state.status === 'running') {
+        if (command === 'resume' && (prompt !== undefined || prepared.turn.input.length)) throw new Error(`Thread has a running turn (${state.turnId}); use steer`);
+        announceTurnId = state.turnId;
+        registerTurn();
+      }
+    }
     if (command === 'start' || command === 'resume' && (prompt !== undefined || prepared.turn.input.length)) {
-      if (state.status === 'running') throw new Error(`Thread has a running turn (${state.turnId}); use steer`);
       await startTurn({ ...prepared.turn, threadId: state.threadId });
     }
     ready = true; for (const event of buffered.splice(0)) reduce(event); store.save(state);
@@ -365,11 +384,14 @@ export async function waitForTurn(store, options, key, report = value => console
         targetTurnId ??= state.turnId; failures = 0;
         // History snapshots can lose terminal errors. The observed completion
         // (or attached logger's saved failure) is authoritative for this turn.
-        if (terminal(state.status) && !completions.has(state.turnId)) rememberFailure(store.read(key));
+        const latest = terminal(state.status) ? findState(store, key) : null;
+        const saved = latest?.threadId === state.threadId ? latest : null;
+        if (saved && !completions.has(state.turnId)) rememberFailure(saved);
         const completion = completions.get(state.turnId);
         if (completion) Object.assign(state, completion);
         if (terminal(state.status)) {
           if (state.lastAgentMessage == null) await finalMessage(rpc, state, controller.signal);
+          if (saved) state.turnNotifications = saved.turnNotifications;
           recordQuietly(store.home, state, { finishedAt: completedAt }); // Repairs the entry of a logger that died.
           break;
         }

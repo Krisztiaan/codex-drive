@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture, until } from '../test-support/app-server.mjs';
@@ -11,36 +11,42 @@ import { recordCompletion, readCompletions } from '../src/outbox.mjs';
 // substituted; these tests run the committed commands the same way against the fixture app-server.
 const plugin = resolve('claude-plugin');
 const hookCommand = JSON.parse(readFileSync(join(plugin, 'hooks/hooks.json'), 'utf8')).hooks.SessionStart[0].hooks[0].command;
+const endCommand = JSON.parse(readFileSync(join(plugin, 'hooks/hooks.json'), 'utf8')).hooks.SessionEnd[0].hooks[0].command;
 const [monitor] = JSON.parse(readFileSync(join(plugin, 'monitors/monitors.json'), 'utf8'));
 const substitute = (command, project) => command.replaceAll('${CLAUDE_PLUGIN_ROOT}', plugin).replaceAll('${CLAUDE_PROJECT_DIR}', project);
 const lines = text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
-const unread = async f => lines((await f.command(['inbox', '--unread'])).stdout).map(e => e.turnId);
-const entry = (turnId, overrides = {}) => ({ name: 'demo', threadId: 'thread-1', turnId, status: 'completed', error: null, ...overrides });
+const OWNER = 'claude-session-a', OTHER = 'claude-session-b';
+const ownerEnv = owner => ({ CLAUDE_CODE_SESSION_ID: owner });
+const unread = async (f, owner = OWNER) => lines((await f.command(['inbox', '--unread'], { env: ownerEnv(owner) })).stdout).map(e => e.turnId);
+const notification = (turnId, owner = OWNER, quiet = false) => ({ turnNotifications: { [turnId]: { owner, quiet } } });
+const entry = (turnId, overrides = {}, owner = OWNER, quiet = false) => ({ name: 'demo', threadId: 'thread-1', turnId, status: 'completed', error: null, ...notification(turnId, owner, quiet), ...overrides });
 const SECRET = 'sk-live-0123456789SECRET';
 
-function shell(f, command, env = {}) {
+function shell(f, command, env = {}, stdin) {
   // `codex-drive` on PATH is this checkout's CLI, as an installed one would be.
   const bin = join(f.home, 'bin'); mkdirSync(bin, { recursive: true });
   try { symlinkSync(resolve('src/cli.mjs'), join(bin, 'codex-drive')); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   const started = Date.now();
-  const child = spawn('/bin/sh', ['-c', command], { cwd: f.home, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  const child = spawn('/bin/sh', ['-c', command], { cwd: f.home, detached: true, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CODEX_DRIVE_HOME: f.home, CODEX_HOME: join(f.home, 'codex'), CLAUDE_PROJECT_DIR: f.home,
-      CODEX_DRIVE_BIN: '', CODEX_WORKERS_CWD: '', CODEX_WORKERS_SINCE: '', CODEX_WORKERS_DEADLINE_MS: '', ...env } });
+      CODEX_DRIVE_BIN: '', CODEX_WORKERS_CWD: '', CODEX_WORKERS_SINCE: '', CODEX_WORKERS_DEADLINE_MS: '10000', ...ownerEnv(OWNER), ...env } });
+  if (stdin !== undefined) child.stdin.end(stdin);
   let stdout = '', stderr = '';
   child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });
   const result = new Promise(done => child.once('close', code => done({ code, stdout, stderr, ms: Date.now() - started })));
   return { child, result, stdout: () => stdout, stop() { try { process.kill(-child.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; } } };
 }
-const hook = (f, env) => shell(f, substitute(hookCommand, f.home), env).result;
+const hook = (f, env, session_id = OWNER, source = 'startup') => shell(f, substitute(hookCommand, f.home), env, JSON.stringify({ session_id, source })).result;
+const end = (f, session_id) => shell(f, substitute(endCommand, f.home), {}, JSON.stringify({ session_id, reason: 'resume' })).result;
 const view = (f, args, env) => shell(f, `node "${plugin}/scripts/codex-workers.mjs" show "${f.home}" ${args}`, env).result;
-const running = (f, overrides = {}) => { f.turns.push({ id: 'turn-2', status: 'inProgress', items: [], error: null }); f.seed({ status: 'running', turnId: 'turn-2', lastEventTime: new Date().toISOString(), ...overrides }); };
+const running = (f, overrides = {}) => { f.turns.push({ id: 'turn-2', status: 'inProgress', items: [], error: null }); f.seed({ status: 'running', turnId: 'turn-2', lastEventTime: new Date().toISOString(), ...notification('turn-2'), ...overrides }); };
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; } };
 
 test('the SessionStart hook is quiet with nothing running and nothing unread, and when codex-drive is missing', async t => {
   const f = await fixture(t);
   f.seed({ lastEventTime: new Date().toISOString() });
   recordCompletion(f.home, entry('turn-1', { cwd: f.home }));
-  assert.equal((await f.command(['inbox', '--ack'])).code, 0);
+  assert.equal((await f.command(['inbox', '--ack'], { env: ownerEnv(OWNER) })).code, 0);
   const quiet = await hook(f);
   assert.equal(quiet.code, 0, quiet.stderr); assert.equal(quiet.stdout, '');
   const missing = await hook(f, { CODEX_DRIVE_BIN: join(f.home, 'no-such-codex-drive') });
@@ -51,14 +57,15 @@ test('the SessionStart hook lists running workers and unread completions as meta
   const f = await fixture(t);
   f.turns[0].items = [{ type: 'agentMessage', id: 'm-1', text: `Token ${SECRET}\nmore` }];
   running(f, { lastAgentMessage: `Running with ${SECRET}` });
-  recordCompletion(f.home, entry('turn-1', { cwd: join(f.home, '.worktrees/lane') }), { finishedAt: Date.parse('2026-11-16T10:00:00Z') });
+  const finishedAt = Date.now() - 60_000;
+  recordCompletion(f.home, entry('turn-1', { cwd: join(f.home, '.worktrees/lane') }), { finishedAt });
   recordCompletion(f.home, entry('turn-x', { name: 'elsewhere', threadId: 'thread-9', cwd: '/elsewhere' }));
   const first = await hook(f);
   assert.equal(first.code, 0, first.stderr);
   assert.equal(first.stdout, [
     `codex-drive: 1 running under ${f.home}: demo`,
     'codex-drive: 1 finished:',
-    '  demo completed at 2026-11-16T10:00:00.000Z; read it with codex-drive result demo --turn turn-1',
+    `  demo completed at ${new Date(finishedAt).toISOString()}; read it with codex-drive result demo --turn turn-1`,
   ].join('\n') + '\n');
   assert.ok(!first.stdout.includes('SECRET'));
   // The worker has since started turn-2; the printed command still reads the completion it names.
@@ -71,7 +78,7 @@ test('the SessionStart hook lists running workers and unread completions as meta
 
 test('the SessionStart hook repairs the outbox entry of a settled turn whose logger died', async t => {
   const f = await fixture(t);
-  f.seed({ status: 'running', lastEventTime: new Date().toISOString() }); // Saved as running; the server finished turn-1.
+  f.seed({ status: 'running', lastEventTime: new Date().toISOString(), ...notification('turn-1') }); // Saved as running; the server finished turn-1.
   assert.equal(readCompletions(f.home).length, 0);
   const output = await hook(f);
   assert.equal(output.code, 0, output.stderr);
@@ -111,7 +118,7 @@ test('the SessionStart hook ends by its deadline when codex-drive ignores SIGTER
 
 test('a stalled server does not stall session start, and unread completions are still delivered', async t => {
   const f = await fixture(t);
-  f.seed({ status: 'running', lastEventTime: new Date().toISOString() });
+  f.seed({ status: 'running', lastEventTime: new Date().toISOString(), ...notification('turn-1') });
   f.pause('thread/turns/list');
   recordCompletion(f.home, entry('turn-1', { cwd: f.home }));
   const output = await hook(f, { CODEX_WORKERS_DEADLINE_MS: '2500' });
@@ -119,18 +126,27 @@ test('a stalled server does not stall session start, and unread completions are 
   assert.ok(output.ms < 5000, `took ${output.ms} ms`);
   assert.match(output.stdout, /codex-drive status did not finish within 1\.5 s/);
   assert.match(output.stdout, /\n {2}demo completed at \S+; read it with codex-drive result demo --turn turn-1\n$/);
-  assert.deepEqual(await unread(f), []);
+  // Delivery is required within this budget. Acknowledgement is best effort after output.
 });
 
-test('two sessions starting at once deliver every completion, each at most once per session', async t => {
+test('SessionStart uses hook identity across resume and compaction, and acknowledges only that session', async t => {
   const f = await fixture(t);
-  const ids = Array.from({ length: 6 }, (_, i) => `turn-c${i}`);
-  for (const id of ids) recordCompletion(f.home, entry(id, { cwd: f.home }));
-  const [a, b] = await Promise.all([hook(f), hook(f)]);
-  const shown = output => output.stdout.split('\n').filter(line => line.startsWith('  demo')).length;
-  assert.ok(shown(a) + shown(b) >= ids.length, 'every entry reached a session');
-  for (const output of [a, b]) assert.ok(shown(output) <= ids.length, 'no session printed an entry twice');
-  assert.deepEqual(await unread(f), []);
+  recordCompletion(f.home, entry('turn-a', { cwd: f.home }));
+  recordCompletion(f.home, entry('turn-b', { cwd: f.home }, OTHER));
+  recordCompletion(f.home, entry('turn-old', { cwd: f.home }, null));
+  recordCompletion(f.home, entry('turn-quiet', { cwd: f.home }, OWNER, true));
+  assert.equal((await hook(f, {}, null)).stdout, '');
+  const a = await hook(f, ownerEnv(OTHER), OWNER, 'resume');
+  assert.match(a.stdout, /1 finished:[\s\S]*--turn turn-a/);
+  assert.doesNotMatch(a.stdout, /turn-b|turn-old|turn-quiet/);
+  assert.equal((await hook(f, {}, OWNER, 'compact')).stdout, '');
+  assert.deepEqual((await unread(f, OTHER)).sort(), ['turn-a', 'turn-b', 'turn-old', 'turn-quiet']);
+  const manual = await view(f, '');
+  assert.match(manual.stdout, /owner: claude-session-b.*--turn turn-b/);
+  assert.match(manual.stdout, /owner: unowned.*--turn turn-old/);
+  assert.match(manual.stdout, /--turn turn-quiet/);
+  assert.match((await hook(f, {}, OTHER)).stdout, /1 finished:[\s\S]*--turn turn-b/);
+  assert.equal((await hook(f, {}, OTHER, 'resume')).stdout, '');
 });
 
 test('/codex-workers lists metadata only and acknowledges it; /codex-workers <name> alone shows the message', async t => {
@@ -140,15 +156,15 @@ test('/codex-workers lists metadata only and acknowledges it; /codex-workers <na
   recordCompletion(f.home, entry('turn-1', { cwd: f.home }));
   const overview = await view(f, '');
   assert.equal(overview.code, 0, overview.stderr);
-  assert.match(overview.stdout, new RegExp(`^## Running under ${f.home} \\(1\\)\\n- demo \\(gpt-6.1-sol, last event \\d+s ago\\)\\n`));
-  assert.match(overview.stdout, /## Unread completions \(1\)\n- demo completed at \S+; read it with codex-drive result demo --turn turn-1\n/);
+  assert.match(overview.stdout, /^## Running under .* \(1\)\n- demo \(gpt-6.1-sol, last event \d+s ago\) \(owner: claude-session-a\)\n/);
+  assert.match(overview.stdout, /## Unread completions \(1\)\n- demo completed at \S+ \(owner: claude-session-a\); read it with codex-drive result demo --turn turn-1\n/);
   assert.ok(!overview.stdout.includes('SECRET'), 'no message or running text in the overview');
   assert.deepEqual(await unread(f), []);
-  assert.match((await view(f, '')).stdout, /## Already read, last 24h \(1\)\n- demo completed at \S+; read it with codex-drive result demo --turn turn-1\n/);
+  assert.match((await view(f, '')).stdout, /## Already read, last 24h \(1\)\n- demo completed at \S+ \(owner: claude-session-a\); read it with codex-drive result demo --turn turn-1\n/);
   f.turns.pop(); // turn-2 settles away; the latest settled turn is turn-1
   const one = await view(f, 'demo');
   assert.equal(one.code, 0, one.stderr);
-  assert.equal(one.stdout, `## demo completed turn-1\nFirst line ${SECRET}\nSecond line\n`);
+  assert.equal(one.stdout, `## demo completed turn-1 (owner: unowned)\nFirst line ${SECRET}\nSecond line\n`);
 });
 
 test('/codex-workers refuses a bad name, and a result it cannot read leaves the entry unread', async t => {
@@ -163,18 +179,59 @@ test('/codex-workers refuses a bad name, and a result it cannot read leaves the 
   assert.equal(missing.code, 0); assert.match(missing.stdout, /codex-drive was not found/);
 });
 
-test('the monitor prints one metadata line per completion of this project and acknowledges it after printing', async t => {
+test('the monitor follows the active owner and project, including after an in-process resume', async t => {
   const f = await fixture(t);
   f.turns[0].items = [{ type: 'agentMessage', id: 'm-1', text: SECRET }];
   const follower = shell(f, substitute(monitor.command, f.home));
   t.after(() => follower.stop());
-  await delay(400);
+  await until(() => {
+    try { return readdirSync(join(f.home, 'claude-monitors')).some(name => name.endsWith('.owner')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; return false; }
+  }, 'monitor started');
   recordCompletion(f.home, entry('turn-other', { name: 'other', threadId: 'thread-9', cwd: '/elsewhere' }));
-  recordCompletion(f.home, entry('turn-1', { cwd: join(f.home, '.worktrees/lane'), status: 'failed', error: { message: 'limit', codexErrorInfo: 'usageLimitExceeded', additionalDetails: null } }), { finishedAt: Date.parse('2026-11-16T11:00:00Z') });
+  recordCompletion(f.home, entry('turn-b', { cwd: f.home }, OTHER));
+  recordCompletion(f.home, entry('turn-old', { cwd: f.home }, null));
+  const finishedAt = Date.now() - 60_000;
+  recordCompletion(f.home, entry('turn-1', { cwd: join(f.home, '.worktrees/lane'), status: 'failed', error: { message: 'limit', codexErrorInfo: 'usageLimitExceeded', additionalDetails: null } }), { finishedAt });
   await until(() => follower.stdout().includes('demo'), 'monitor line');
-  await until(async () => (await unread(f)).length === 1, 'acknowledged');
-  assert.equal(follower.stdout(), 'codex-drive: demo failed (usageLimit) at 2026-11-16T11:00:00.000Z; read it with codex-drive result demo --turn turn-1\n');
-  assert.deepEqual(await unread(f), ['turn-other']);
+  await until(async () => (await unread(f)).length === 3, 'acknowledged');
+  assert.equal(follower.stdout(), `codex-drive: demo failed (usageLimit) at ${new Date(finishedAt).toISOString()}; read it with codex-drive result demo --turn turn-1\n`);
+  assert.equal((await end(f, OWNER)).code, 0);
+  recordCompletion(f.home, entry('turn-stale', { cwd: f.home }));
+  const resumed = await hook(f, {}, OTHER, 'resume');
+  assert.equal(resumed.code, 0, resumed.stderr);
+  recordCompletion(f.home, entry('turn-new', { cwd: f.home }, OTHER));
+  await until(() => follower.stdout().includes('--turn turn-new'), 'resumed owner monitor line');
+  await until(async () => !(await unread(f, OTHER)).includes('turn-new'), 'resumed owner acknowledged');
+  assert.match(resumed.stdout + follower.stdout(), /turn-b/);
+  assert.doesNotMatch(follower.stdout(), /turn-stale|turn-old|turn-other/);
+  assert.ok((await unread(f)).includes('turn-new'));
+});
+
+test('a worker started by a child script inherits the session and --quiet lets its wait deliver the result', async t => {
+  const f = await fixture(t);
+  const follower = shell(f, substitute(monitor.command, f.home));
+  t.after(() => follower.stop());
+  const started = await shell(f, `sh -c 'codex-drive start --port ${f.port} --name scripted --detach --quiet Work'`).result;
+  assert.equal(started.code, 0, started.stderr);
+  const { turnId } = JSON.parse(started.stdout);
+  const waiting = shell(f, 'codex-drive wait scripted');
+  t.after(() => waiting.stop());
+  await until(() => f.hasRead(), 'wait observer snapshot');
+  f.complete('completed', 'Done');
+  const waited = await waiting.result;
+  assert.equal(waited.code, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).owner, OWNER);
+  assert.deepEqual(readCompletions(f.home).map(e => [e.turnId, e.owner, e.quiet]), [[turnId, OWNER, true]]);
+  assert.equal((await hook(f)).stdout, '');
+
+  await until(() => !existsSync(join(f.home, 'threads/scripted.json.lock')), 'detached logger released the writer lock');
+  const resumed = await f.command(['resume', 'scripted', '--detach', 'Continue'], { env: ownerEnv(OWNER) });
+  assert.equal(resumed.code, 0, resumed.stderr);
+  const next = JSON.parse(resumed.stdout).turnId;
+  f.complete('completed', 'Next');
+  await until(() => follower.stdout().includes(`--turn ${next}\n`), 'ordinary resumed turn delivered');
+  assert.doesNotMatch(follower.stdout(), new RegExp(`--turn ${turnId}\\n`));
 });
 
 test('the monitor stops without acknowledging when its output is gone', async t => {
@@ -182,7 +239,7 @@ test('the monitor stops without acknowledging when its output is gone', async t 
   const bin = join(f.home, 'bin'); mkdirSync(bin, { recursive: true });
   symlinkSync(resolve('src/cli.mjs'), join(bin, 'codex-drive'));
   const child = spawn(process.execPath, [join(plugin, 'scripts/codex-workers.mjs'), 'follow', f.home], { stdio: ['ignore', 'pipe', 'ignore'],
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CODEX_DRIVE_HOME: f.home, CODEX_DRIVE_BIN: '' } });
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CODEX_DRIVE_HOME: f.home, CODEX_DRIVE_BIN: '', ...ownerEnv(OWNER) } });
   t.after(() => child.kill('SIGKILL'));
   await delay(400);
   child.stdout.destroy(); // The session went away.

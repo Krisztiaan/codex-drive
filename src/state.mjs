@@ -48,6 +48,12 @@ export class Store {
     return () => unlinkSync(path);
   }
 }
+export function turnNotification(state, turnId = state.turnId) {
+  return turnId && Object.hasOwn(state.turnNotifications ?? {}, turnId)
+    ? state.turnNotifications[turnId]
+    : { owner: null, quiet: false };
+}
+
 export function applyEvent(state, event, time = new Date().toISOString()) {
   const p = event.params;
   if (event.method === 'account/rateLimits/updated') {

@@ -1,7 +1,7 @@
 {
   "name": "codex-drive",
-  "version": "0.1.0",
-  "description": "Codex workers driven by codex-drive in Claude Code: running workers and unread completions at session start, a notification per completion, and /codex-workers.",
+  "version": "0.2.0",
+  "description": "Session-owned Codex worker notifications and a project-wide /codex-workers overview.",
   "author": {
     "name": "Krisztiaan"
   },

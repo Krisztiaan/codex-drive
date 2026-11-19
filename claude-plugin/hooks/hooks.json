@@ -1,13 +1,24 @@
 {
-  "description": "At session start, list this project's running codex-drive workers and the completions no session has seen yet.",
+  "description": "List the active session's codex-drive workers and switch the monitor when the session changes.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-workers.mjs\" session-start",
+            "command": "exec node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-workers.mjs\" session-start",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-workers.mjs\" session-end"
           }
         ]
       }

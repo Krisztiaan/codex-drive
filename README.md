@@ -107,7 +107,7 @@ The default `--request-policy approve` automatically answers command/file/permis
 
 ## Status, waiting and failures
 
-`status` without a name prints a compact table (name, status, model, cwd tail, event age, last message and quota remaining). Use `--json` for the previous JSON array. Filters combine: `--active`, `--cwd /project` (path prefix with directory boundaries), `--since 24h`, and `--name 'goal-*'` (shell-quoted glob with `*`/`?`). Durations accept positive s/m/h/d/w values. Unreachable servers produce an unavailable row with `refreshError` in JSON, allowing other sessions to remain visible. Active filtering uses refreshed status. Usage percentages are observed quota headroom, not permission to dispatch.
+`status` without a name prints a compact table (name, status, model, cwd tail, event age, last message, quota remaining and owner). Use `--json` for the JSON array. Filters combine: `--active`, `--cwd /project` (path prefix with directory boundaries), `--since 24h`, `--name 'goal-*'` (shell-quoted glob with `*`/`?`), and `--owner <session-id>`. Durations accept positive s/m/h/d/w values. Unreachable servers produce an unavailable row with `refreshError` in JSON, allowing other sessions to remain visible. Active filtering uses refreshed status. Usage percentages are observed quota headroom, not permission to dispatch.
 
 `status <name|threadId>` keeps its JSON object output and adds `steers`, with accepted steering text, turn ID and timestamp. Steering is stored in a separate per-thread journal under `CODEX_DRIVE_HOME/steers/` to avoid racing the attached state writer.
 
@@ -143,13 +143,17 @@ Timeout accepts positive fractional seconds and covers connections/RPCs. It leav
 | 2 | Unknown name, thread ID or turn |
 | 3 | Not finished: the requested turn is still running, or no turn has settled yet |
 
-Each settled turn gets one entry in the completion outbox, `CODEX_DRIVE_HOME/outbox/` (default `~/.codex-drive/outbox/`): a small JSON file named `<threadId>@<turnId>.json` with `name`, `threadId`, `turnId`, `cwd`, `status` (`completed`, `failed`, `interrupted`), `failure` (`capacity`, `usageLimit`, `other` or null), `exitCode` (the `wait` contract) and `finishedAt`. It holds no message text, errors or prompts; read content with `result`. `finishedAt` is the server's completion time when known (from the turn, the recovery snapshot or the journal), otherwise the time of recording.
+Each settled turn gets one entry in the completion outbox, `CODEX_DRIVE_HOME/outbox/` (default `~/.codex-drive/outbox/`). The `<threadId>@<turnId>.json` file holds `name`, `threadId`, `turnId`, `cwd`, `owner` (Claude Code session ID or null), `quiet`, `status`, `failure`, `exitCode` (the `wait` contract) and `finishedAt`. Read the message with `result`. `finishedAt` is the server's completion time when available and the time of recording otherwise.
 
 The logger (attached or `--detach`) records each turn it saw running when it settles, so entries appear with no `wait` running. `wait` and `result` record the terminal turn they observe too, which repairs the entry of a logger that died; until one of them runs, a follower does not learn of a turn whose logger died. Recording is idempotent: each entry is written to a temporary file and published with a hard link, which never replaces an existing entry, so racing recorders leave exactly one file and a crash never leaves a partial entry. A failed recording is reported to the session log (or stderr for `wait` and `result`) through a sink that never throws, so it cannot change a command's exit code.
 
 Each recording prunes entries older than 14 days or beyond the newest 2,000 turns by `finishedAt`, with their acknowledgement markers; a repair for a turn already past the age is skipped. Temporary files and orphan markers are removed once they are an hour old. Both limits are adjustable: `CODEX_DRIVE_OUTBOX_MAX_AGE` (a duration such as `30d`) and `CODEX_DRIVE_OUTBOX_MAX_ENTRIES`.
 
-`inbox` prints the entries ordered by `finishedAt`, one JSON line each. `--since 24h` (or an ISO time) limits by `finishedAt`; `--unread` skips acknowledged entries; `--cwd prefix` keeps entries whose worker ran in that directory or below it, as `status --cwd` does, comparing both paths with symlinks resolved (a path that no longer exists resolves its nearest existing ancestor); entry keys (`<threadId>@<turnId>`) as positionals keep only those entries, so `inbox --ack <key>...` acknowledges exactly what a reader delivered; `--ack` acknowledges what it prints by creating an empty `<threadId>@<turnId>.acked` marker beside it. `--follow` takes a baseline scan, starts watching the outbox directory (no polling), then rescans, so nothing published during startup is lost; every later change triggers a rescan, and each entry prints once. Combined with `--unread` or `--since` it prints the matching baseline too. Two followers can both print an entry before either acknowledges it. From Claude's side a notification is shown at most once per reader (two concurrent readers can each show it), and the plugin acknowledges an entry after its output is written to the hook's or monitor's stdout, and Claude Code gives a hook no receipt, so a session that ends in that instant can lose the notification. The completion stays available within the outbox retention: `codex-drive inbox` without `--unread`, `status` and `result` still show it.
+`inbox` prints completions as JSON lines ordered by `finishedAt`. Use `--since 24h` or an ISO timestamp to limit by finish time, `--unread` to skip acknowledgements, and `--cwd prefix` to restrict the directory as in `status`. Use `--owner <session-id>` to select that session's automatic notifications, excluding quiet and unowned completions. Without `--owner`, the inbox includes every owner and unowned entries.
+
+`--ack` marks the printed entries read. Pass entry keys as positionals to acknowledge specific turns, for example `inbox --ack <threadId>@<turnId>`. The reader is the ID from `--owner` or the current `CLAUDE_CODE_SESSION_ID`. A plain terminal uses the existing shared manual acknowledgements. Read state in one Claude Code session has no effect on other sessions.
+
+`--follow` scans, watches the outbox directory, then rescans to catch entries published during startup. It delivers new matching entries once per follower. With `--unread` or `--since`, it also prints matching existing entries. Concurrent readers of the same inbox can print the same entry before either acknowledges it.
 
 ## Orchestrator pattern
 
@@ -181,7 +185,9 @@ codex-drive result project-task --turn <id>   # the line's turnId: that turn's f
 
 In a new or resumed session, run `codex-drive inbox --unread --ack` once to see completions that arrived while no follower ran, then `codex-drive status --active` for the workers still running.
 
-The Claude Code plugin in [`claude-plugin/`](claude-plugin/README.md) does all three per project: a `SessionStart` summary, a monitor on `inbox --follow --cwd <project>`, and `/codex-workers`.
+The [Claude Code plugin](claude-plugin/README.md) automatically reports only the current session's workers in its project scope. `start` and `resume` record the session ID from `CLAUDE_CODE_SESSION_ID` on each new turn. `adopt` and `resume` without a prompt can claim an unowned running turn. Bash-launched scripts and subagents inherit the parent session ID. Older workers and launches from a plain terminal remain available in `status`, `inbox` and `/codex-workers`.
+
+Pass `--quiet` to `start`, `resume` or `adopt` when the caller will collect the completion itself, for example with `codex-drive wait`. The result stays available in the unfiltered inbox. A running `wait` alone leaves the notification policy as set at launch.
 
 ## Server ownership and persistence
 

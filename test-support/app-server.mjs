@@ -142,8 +142,8 @@ export async function fixture(t, { port: requestedPort = 0, diagnostics, turnsLi
   const state = { name: 'demo', threadId, turnId: 'turn-1', cwd: home, model: 'gpt-6.1-sol', effort: 'low', sandbox: 'workspace-write', approval: 'on-request', addDirs: [], logPath: join(home, 'events.jsonl'), port, status: 'completed', lastAgentMessage: 'PREVIOUS', lastEventTime: null };
   function seed(overrides = {}) { writeFileSync(join(home, 'threads/demo.json'), JSON.stringify({ ...state, ...overrides })); }
   seed();
-  function launch(args, { cwd, stdin } = {}) {
-    const child = spawn(process.execPath, [cliPath ?? process.env.CODEX_DRIVE_TEST_CLI ?? resolve('src/cli.mjs'), ...args], { env: { ...process.env, CODEX_DRIVE_HOME: home, CODEX_HOME: join(home, 'codex') }, cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+  function launch(args, { cwd, stdin, env } = {}) {
+    const child = spawn(process.execPath, [cliPath ?? process.env.CODEX_DRIVE_TEST_CLI ?? resolve('src/cli.mjs'), ...args], { env: { ...process.env, CLAUDE_CODE_SESSION_ID: '', CODEX_DRIVE_HOME: home, CODEX_HOME: join(home, 'codex'), ...env }, cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     if (stdin !== undefined) child.stdin.end(stdin);
     children.add(child); let stdout = '', stderr = '';
     child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });

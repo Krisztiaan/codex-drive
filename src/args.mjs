@@ -1,13 +1,13 @@
 import { resolve } from 'node:path';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
-const values = new Set(['port', 'cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'name', 'log', 'turn', 'n', 'timeout', 'param', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity', 'since', 'older-than']);
-const turnOptions = ['cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'detach', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity'];
+const values = new Set(['port', 'cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'name', 'log', 'turn', 'n', 'timeout', 'param', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity', 'since', 'older-than', 'owner']);
+const turnOptions = ['cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'detach', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity', 'quiet'];
 const allowed = {
   serve: ['port', 'stop', 'restart', 'force', 'timeout'], start: [...turnOptions, 'name', 'log'], resume: [...turnOptions, 'name', 'log'],
-  adopt: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'], attach: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy'],
+  adopt: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy', 'quiet'], attach: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy', 'quiet'],
   fork: ['name', 'log', 'sandbox', 'approval', 'thread-params', 'request-policy'],
-  steer: ['turn'], interrupt: ['turn'], status: ['json', 'active', 'cwd', 'since', 'name'], result: ['turn', 'json'], inbox: ['follow', 'since', 'unread', 'ack', 'cwd'], wait: ['timeout', 'all', 'any'], tail: ['n'], events: ['follow'],
+  steer: ['turn'], interrupt: ['turn'], status: ['json', 'active', 'cwd', 'since', 'name', 'owner'], result: ['turn', 'json'], inbox: ['follow', 'since', 'unread', 'ack', 'cwd', 'owner'], wait: ['timeout', 'all', 'any'], tail: ['n'], events: ['follow'],
   pending: [], respond: ['error'], call: ['request-policy'], methods: [],
   list: [], read: [], archive: [], unarchive: [], rollback: [], compact: [], name: [], models: [], account: ['json'], 'rate-limits': ['json'], prune: ['older-than', 'apply', 'calls'],
 };

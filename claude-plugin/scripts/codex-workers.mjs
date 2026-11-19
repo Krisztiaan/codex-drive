@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // Claude Code views of codex-drive: the SessionStart summary, the completion monitor and /codex-workers.
-// Stateless: every fact comes from `codex-drive status`, `inbox` and `result`; nothing is stored here.
+// Worker state comes from `codex-drive status`, `inbox` and `result`.
 // Automatic output (session start, monitor, the /codex-workers overview) carries metadata only; message text
 // appears only when a person asks for one worker with `/codex-workers <name>`.
 // An entry is acknowledged only after its line has been written, so a failure or timeout leaves it unread.
 // Usage: codex-workers.mjs session-start|follow [projectDir]
 //        codex-workers.mjs show [projectDir] [name]
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 // Parameters, each adjustable from the environment of the Claude Code session where noted.
@@ -26,6 +29,27 @@ const RESULT_CHARS = 4000;      // Message shown by /codex-workers <name>; the r
 const RECENT = 8;               // Acknowledged completions listed by /codex-workers
 const SETTLED = new Set(['completed', 'failed', 'interrupted']);
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/; // codex-drive's own name alphabet
+// The hook and monitor exec Node as direct children of Claude Code. The monitor lives across /resume and
+// /clear, so the hooks publish the current conversation for that process. Start overwrites any stale binding.
+const bindings = join(process.env.CODEX_DRIVE_HOME ?? join(homedir(), '.codex-drive'), 'claude-monitors');
+const bindingName = `${process.ppid}.owner`;
+const binding = join(bindings, bindingName);
+function readBinding() {
+  try { return readFileSync(binding, 'utf8'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; return ''; }
+}
+function writeBinding(owner) {
+  const temporary = `${binding}.${process.pid}.tmp`;
+  try { writeFileSync(temporary, owner, { mode: 0o600 }); renameSync(temporary, binding); }
+  finally { rmSync(temporary, { force: true }); }
+}
+function hookOwner() {
+  try { return JSON.parse(readFileSync(0, 'utf8')).session_id?.trim(); } catch { return null; }
+}
+function sessionEnd() {
+  const owner = hookOwner();
+  if (owner && readBinding() === owner) writeBinding('');
+}
 
 const clean = text => String(text ?? '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' ');
 const cut = (text, max) => text.length > max ? text.slice(0, max - 1) + '…' : text;
@@ -35,9 +59,11 @@ const firstLine = text => clean(text).split('\n').map(line => line.trim()).find(
 const jsonLines = text => text.split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 const seconds = ms => `${Math.round(ms / 100) / 10} s`;
 const failureClass = failure => failure ? ` (${typeof failure === 'string' ? failure : failure.class})` : '';
+const ownerArgs = owner => owner ? ['--owner', owner] : [];
+const ownerLabel = item => ` (owner: ${clean(item.owner ?? 'unowned')})`;
 // Metadata only: name, status, failure class, finish time and the command that reads exactly this turn (a newer
 // turn of the same worker must not answer it); never message text.
-const completion = entry => `${label(entry)} ${clean(entry.status)}${clean(failureClass(entry.failure))} at ${clean(entry.finishedAt)}; read it with codex-drive result ${label(entry)} --turn ${clean(entry.turnId)}`;
+const completion = (entry, showOwner = false) => `${label(entry)} ${clean(entry.status)}${clean(failureClass(entry.failure))} at ${clean(entry.finishedAt)}${showOwner ? ownerLabel(entry) : ''}; read it with codex-drive result ${label(entry)} --turn ${clean(entry.turnId)}`;
 const emit = text => new Promise((resolve, reject) => process.stdout.write(text + '\n', error => error ? reject(error) : resolve()));
 
 // One codex-drive call that ends by `until` (absolute ms): SIGTERM to its process group at the time, SIGKILL after
@@ -59,8 +85,8 @@ function run(args, until) {
   });
 }
 const why = (call, ms) => call.timedOut ? `did not finish within ${seconds(ms)}` : `failed: ${cut(firstLine(call.stderr) || `exit ${call.code}`, 160)}`;
-async function sessions(scope, until, budget) {
-  const call = await run(['status', '--json', '--cwd', scope, '--since', WINDOW], until);
+async function sessions(scope, until, budget, owner) {
+  const call = await run(['status', '--json', '--cwd', scope, '--since', WINDOW, ...ownerArgs(owner)], until);
   if (call.missing) return { missing: true };
   if (call.code === 0) try { return { list: JSON.parse(call.stdout) }; } catch {}
   return { failed: `codex-drive status ${why(call, budget)}` };
@@ -71,8 +97,8 @@ async function inbox(args, until, budget) {
   return jsonLines(call.stdout);
 }
 // Called only after the entries' lines were written.
-async function acknowledge(entries, until) {
-  if (entries.length) await run(['inbox', '--ack', ...entries.map(turnKey)], until);
+async function acknowledge(entries, until, owner) {
+  if (entries.length) await run(['inbox', '--ack', ...ownerArgs(owner), ...entries.map(turnKey)], until);
 }
 // Settled turns that status reports but the outbox never recorded (a logger that died) are recorded by
 // `codex-drive result`. Work stops being scheduled at `until`; what is left is repaired by a later run.
@@ -99,20 +125,23 @@ function runningLines(scope, list) {
   return lines;
 }
 // Status and repairs end RESERVE_MS before the deadline; listing and acknowledgement use the rest.
-async function overview(scope, budget) {
+async function overview(scope, budget, owner) {
   const deadline = Date.now() + budget, early = deadline - RESERVE_MS, lines = [];
-  const found = await sessions(scope, early, budget - RESERVE_MS);
+  const found = await sessions(scope, early, budget - RESERVE_MS, owner);
   if (found.missing) return { missing: true };
   if (found.list) {
     try { await repairMissing(scope, found.list, early, budget - RESERVE_MS); } catch (error) { lines.push(`codex-drive: ${error.message}`); }
   } else lines.push(`codex-drive: ${found.failed}; run codex-drive status --cwd ${scope}`);
   let unread = [];
-  try { unread = await inbox(['--cwd', scope, '--unread'], deadline, budget); } catch (error) { lines.push(`codex-drive: ${error.message}`); }
+  try { unread = await inbox(['--cwd', scope, '--unread', ...ownerArgs(owner)], deadline, budget); } catch (error) { lines.push(`codex-drive: ${error.message}`); }
   return { deadline, lines, list: found.list ?? [], unread };
 }
 
 async function sessionStart(scope) {
-  const view = await overview(scope, SESSION_DEADLINE_MS);
+  const owner = hookOwner();
+  if (!owner) return;
+  if (existsSync(binding) && readBinding() !== owner) writeBinding(owner);
+  const view = await overview(scope, SESSION_DEADLINE_MS, owner);
   if (view.missing) return;
   const { deadline, unread } = view, lines = [...runningLines(scope, view.list), ...view.lines];
   let shown = [];
@@ -125,7 +154,7 @@ async function sessionStart(scope) {
   }
   if (!lines.length) return;
   await emit(lines.join('\n'));
-  await acknowledge(shown, deadline);
+  await acknowledge(shown, deadline, owner);
 }
 
 async function show(scope, name) {
@@ -140,12 +169,12 @@ async function show(scope, name) {
   const out = [...view.lines, `## Running under ${scope} (${running.length})`];
   for (const s of running) {
     const age = s.lastEventTime ? `last event ${Math.max(0, Math.round((Date.now() - Date.parse(s.lastEventTime)) / 1000))}s ago` : 'no event yet';
-    out.push(`- ${label(s)} (${clean(s.model ?? '-')}, ${s.refreshError ? 'server did not answer' : s.pendingRequests?.length ? `waiting for ${s.pendingRequests.length} answer(s)` : age})`);
+    out.push(`- ${label(s)} (${clean(s.model ?? '-')}, ${s.refreshError ? 'server did not answer' : s.pendingRequests?.length ? `waiting for ${s.pendingRequests.length} answer(s)` : age})${ownerLabel(s)}`);
   }
   out.push('', `## Unread completions (${unread.length})`);
-  for (const entry of shown) out.push(`- ${completion(entry)}`);
+  for (const entry of shown) out.push(`- ${completion(entry, true)}`);
   if (shown.length < unread.length) out.push(`- ${unread.length - shown.length} earlier ones stay unread`);
-  if (recent.length) { out.push('', `## Already read, last ${WINDOW} (${recent.length})`); for (const entry of recent) out.push(`- ${completion(entry)}`); }
+  if (recent.length) { out.push('', `## Already read, last ${WINDOW} (${recent.length})`); for (const entry of recent) out.push(`- ${completion(entry, true)}`); }
   out.push('', "/codex-workers <name> shows a worker's latest turn in full.");
   await emit(out.join('\n'));
   await acknowledge(shown, deadline);
@@ -160,37 +189,64 @@ async function showOne(name) {
   if (call.missing) { await emit('codex-drive was not found; install it on PATH or set CODEX_DRIVE_BIN.'); return; }
   if (!result || call.timedOut) { await emit(`codex-drive result ${name} ${why(call, SHOW_DEADLINE_MS)}`); return; }
   const message = result.message == null ? '(no final message)' : clean(result.message);
-  const header = `## ${label(result)} ${clean(result.status)}${clean(failureClass(result.failure))} ${clean(result.turnId ?? '-')}`;
+  const header = `## ${label(result)} ${clean(result.status)}${clean(failureClass(result.failure))} ${clean(result.turnId ?? '-')}${ownerLabel(result)}`;
   await emit(`${header}\n${cut(message, RESULT_CHARS)}${message.length > RESULT_CHARS ? `\n(truncated; full text: codex-drive result ${name})` : ''}`);
   if (result.turnId && SETTLED.has(result.status)) await acknowledge([result], deadline);
 }
 
 // The plugin monitor: one metadata line per new completion, acknowledged after it is written.
-async function follow(scope) {
-  const child = spawn(BIN, ['inbox', '--follow', '--unread', '--cwd', scope], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stderr = '', queue = Promise.resolve();
-  const stop = code => { child.kill('SIGTERM'); process.exit(code); };
+function follow(scope) {
+  const initialOwner = process.env.CLAUDE_CODE_SESSION_ID?.trim();
+  if (!initialOwner) return;
+  mkdirSync(bindings, { recursive: true, mode: 0o700 });
+  writeBinding(initialOwner);
+  let activeOwner, child, stopped = false;
+  const stop = code => {
+    if (stopped) return;
+    stopped = true;
+    child?.kill('SIGTERM');
+    watcher.close();
+    rmSync(binding, { force: true });
+    process.exitCode = code;
+  };
   for (const name of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.once(name, () => stop(0));
   process.stdout.on('error', () => stop(1)); // The session went away: stop the follower, acknowledge nothing more.
-  child.stderr.on('data', d => { stderr += d; });
-  createInterface({ input: child.stdout }).on('line', line => {
-    queue = queue.then(async () => {
-      const [entry] = jsonLines(line);
-      if (!entry) return;
-      await emit(`codex-drive: ${completion(entry)}`);
-      await acknowledge([entry], Date.now() + CALL_TIMEOUT_MS);
-    }).catch(() => stop(1)); // stdout gone: stop without acknowledging
-  });
-  const code = await new Promise(resolve => { child.once('error', error => resolve(error.code === 'ENOENT' ? 0 : 1)); child.once('close', resolve); });
-  await queue;
-  if (code) await emit(`codex-drive: completion monitor stopped: ${cut(firstLine(stderr) || `exit ${code}`, 160)}`).catch(() => {});
-  process.exitCode = code ?? 1;
+  function refresh() {
+    if (stopped) return;
+    const owner = readBinding();
+    if (owner === activeOwner) return;
+    child?.kill('SIGTERM');
+    activeOwner = owner;
+    if (!owner) { child = null; return; }
+    const follower = child = spawn(BIN, ['inbox', '--follow', '--unread', '--cwd', scope, ...ownerArgs(owner)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '', queue = Promise.resolve(), missing = false;
+    follower.stderr.on('data', d => { stderr += d; });
+    createInterface({ input: follower.stdout }).on('line', line => {
+      queue = queue.then(async () => {
+        const [entry] = jsonLines(line);
+        if (!entry || stopped || child !== follower || readBinding() !== owner) return;
+        await emit(`codex-drive: ${completion(entry)}`);
+        await acknowledge([entry], Date.now() + CALL_TIMEOUT_MS, owner);
+      }).catch(() => stop(1));
+    });
+    follower.once('error', error => { missing = error.code === 'ENOENT'; });
+    follower.once('close', async code => {
+      await queue;
+      if (stopped || child !== follower || readBinding() !== owner) return;
+      if (code || code === null && !missing) {
+        await emit(`codex-drive: completion monitor stopped: ${cut(firstLine(stderr) || `exit ${code}`, 160)}`).catch(() => {});
+      }
+      stop(missing ? 0 : code ?? 1);
+    });
+  }
+  const watcher = watch(bindings, (_event, name) => { if (name === bindingName || name === null) refresh(); });
+  refresh();
 }
 
 const [mode, dir, name] = process.argv.slice(2);
 const scope = SCOPE || dir || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-const views = { 'session-start': () => sessionStart(scope), show: () => show(scope, name), follow: () => follow(scope) };
-if (!views[mode]) { console.error('Usage: codex-workers.mjs session-start|follow [projectDir] | show [projectDir] [name]'); process.exit(2); }
+const views = { 'session-start': () => sessionStart(scope), 'session-end': sessionEnd, show: () => show(scope, name), follow: () => follow(scope) };
+if (!views[mode]) { console.error('Usage: codex-workers.mjs session-start|session-end|follow [projectDir] | show [projectDir] [name]'); process.exit(2); }
 // A view never fails its caller: a SessionStart hook or a skill's injected command that exits non-zero would
 // block or abort, so errors become one line of output instead.
 try { await views[mode](); }

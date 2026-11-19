@@ -89,14 +89,14 @@ const usage = `Usage: codex-drive <command>
   serve [--port 4700] [--stop | --restart] [--force] [--timeout seconds]
   methods
   call <method> [<params-json>|@file|-] [--param key=<json>]
-  start ["<prompt>"] [--cwd <dir>] [--model <m>] [--effort <e>] [--log <file>] [--name <n>] [--detach]
-  resume <name|threadId> ["<prompt>"] [--detach]
-  adopt|attach <threadId> [--name <n>] [--log <file>] [--detach]
+  start ["<prompt>"] [--cwd <dir>] [--model <m>] [--effort <e>] [--log <file>] [--name <n>] [--detach] [--quiet]
+  resume <name|threadId> ["<prompt>"] [--detach] [--quiet]
+  adopt|attach <threadId> [--name <n>] [--log <file>] [--detach] [--quiet]
   fork <name|threadId> [--name <new-name>] [--log <file>]
   wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
-  status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob]
+  status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob] [--owner <session-id>]
   result <name|threadId> [--turn <id>] [--json]
-  inbox [<threadId@turnId>...] [--follow] [--since <time>|--unread] [--ack] [--cwd prefix]
+  inbox [<threadId@turnId>...] [--follow] [--since <time>|--unread] [--ack] [--cwd prefix] [--owner <session-id>]
   prune [--calls] [--older-than 30d] [--apply]
   events <name|threadId> [--follow]
   tail <name|threadId> [-n 20]
@@ -126,6 +126,7 @@ Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not 
 inbox prints one JSON line per settled turn (no message text) recorded by its logger, wait or result;
 --since takes 24h or an ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints,
 --cwd keeps entries whose worker ran in that directory or below it (symlinks resolved on both sides),
+--owner <session-id> selects that Claude Code session's automatic notifications,
 entry keys keep only those entries (inbox --ack <key> acknowledges exactly one), --follow prints new ones as recorded.`;
 async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
@@ -215,6 +216,7 @@ async function main() {
     console.log(lines.slice(-Number(options.n ?? 20)).join('\n')); return;
   }
   if (command === 'status') {
+    if (options.owner && positional.length) throw new Error('status --owner takes no worker name');
     const states = positional.length ? [store.read(positional[0])] : filterStates(store.all(), { ...options, active: false }), results = [], inspected = new Set(), usageByPort = new Map();
     if (!states.length) warnServerDirectory(Number(options.port ?? 4700));
     for (const state of states) {
@@ -236,7 +238,12 @@ async function main() {
       } finally { await rpc?.close(); }
     }
     if (positional.length) print(results[0]);
-    else { const filtered = filterStates(results, options); if (options.json) print(filtered); else console.log(table(filtered)); } return;
+    else {
+      const owned = options.owner ? results.filter(state => state.owner === options.owner) : results;
+      const filtered = filterStates(owned, { ...options, owner: undefined });
+      if (options.json) print(filtered); else console.log(table(filtered));
+    }
+    return;
   }
   const state = command !== 'call' && positional[0] ? findState(store, positional[0]) : null;
   if (['steer', 'interrupt'].includes(command) && !state) throw new Error('Unknown thread; adopt it first');
@@ -268,6 +275,7 @@ async function main() {
           cwd: result.cwd ?? thread.cwd ?? state?.cwd, model: result.model ?? state?.model, effort: result.reasoningEffort ?? state?.effort ?? null,
           sandbox: params.sandbox ?? state?.sandbox ?? DEFAULT_PERMISSIONS.sandbox, approval: params.approvalPolicy ?? state?.approval ?? DEFAULT_PERMISSIONS.approval, addDirs: state?.addDirs ?? [],
           status: 'idle', lastAgentMessage: null, lastEventTime: null, error: null, failure: null, driverPid: null, sourceThreadId: params.threadId, requestPolicy: options['request-policy'] ?? state?.requestPolicy ?? DEFAULT_PERMISSIONS.requestPolicy };
+        delete forked.turnNotifications;
         effectiveState(forked, result);
         await snapshot(rpc, forked); store.create(forked); print({ threadId: thread.id, turnId: forked.turnId });
       } else if (['account', 'rate-limits'].includes(command) && !options.json) {

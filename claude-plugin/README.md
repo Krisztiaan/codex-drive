@@ -1,14 +1,22 @@
 # codex-drive plugin for Claude Code
 
-Makes Codex workers started with `codex-drive start --detach` visible in Claude Code sessions. It keeps no state
-of its own: every fact comes from `codex-drive status`, `inbox` and `result`, scoped to the session's project
-directory and everything below it (worktrees included).
+Displays Codex workers in Claude Code. The automatic views select the active session's workers within the
+project directory and its worktrees. The manual overview includes workers from every session in that directory scope.
 
 | Part | What it does |
 | --- | --- |
-| `SessionStart` hook (`hooks/hooks.json`) | On startup, resume, clear and compact, prints at most 12 lines: the names of the project's running workers, then the completions no session has seen yet. Silent when nothing runs and nothing is unread. |
-| Monitor `codex-completions` (`monitors/monitors.json`) | Follows `codex-drive inbox --follow --unread --cwd <project>` for the whole session. Each completion prints one line, which reaches Claude as a notification: `codex-drive: <name> <status> (<failure>) at <finishedAt>; read it with codex-drive result <name> --turn <turnId>`. The command names the exact turn, so a newer turn of the same worker never answers it. |
-| `/codex-workers` (`skills/codex-workers/SKILL.md`) | With no argument: the running workers (name, model, last event age), the unread completions, and the completions already seen in the last 24 hours. Each listed completion carries the same `codex-drive result <name> --turn <turnId>` command. With a worker name, `/codex-workers <name>`: that worker's latest turn, its final message in full, or only its header while it is still running. Also available as `/codex-drive:codex-workers`. |
+| `SessionStart` hook (`hooks/hooks.json`) | On startup, resume, clear and compact, shows the session's running workers and unread completions in at most 12 lines. |
+| Monitor `codex-completions` (`monitors/monitors.json`) | Follows `codex-drive inbox --follow --unread --cwd <project> --owner <session-id>`. Each completion includes a `codex-drive result <name> --turn <turnId>` command for that specific turn. |
+| `/codex-workers` (`skills/codex-workers/SKILL.md`) | Shows workers from every owner, including unowned workers. It lists running workers, unread completions and recently read completions with their owners. With a worker name, it reports the latest turn's status, owner and full message when available. Also available as `/codex-drive:codex-workers`. |
+
+Codex-drive captures `CLAUDE_CODE_SESSION_ID` from the Bash environment on `start`, `resume` and adoption of an
+unowned running turn. The same ID reaches subagents and scripts they run. The hook reads `session_id` from its
+input, and the monitor starts with `CLAUDE_CODE_SESSION_ID`. Claude Code keeps an existing monitor process on an
+interactive `/resume` or `/clear`, so the hooks pause and retarget it through a process-local owner file under
+`CODEX_DRIVE_HOME/claude-monitors/`. Compaction keeps the owner. Automatic output requires a session ID.
+
+Use `--quiet` on a launch that collects its own completion with `wait` or another script. Quiet and unowned
+completions appear in manual views.
 
 **No message text appears on its own.** The hook, the monitor and the `/codex-workers` overview show metadata
 only: name, status, failure class, finish time and the command that reads that turn. A worker's running message and final message never reach a
@@ -16,7 +24,7 @@ session unless a person asks: `/codex-workers <name>` (the skill cannot be invok
 `codex-drive result <name>`.
 
 **An entry is marked read only after its line is written.** The hook, the monitor and `/codex-workers` print
-first, then acknowledge exactly the entries they printed with `codex-drive inbox --ack <threadId>@<turnId>...`. An
+first, then acknowledge exactly the entries they printed in the current session's read state. An
 entry left out by the 12-line limit, an entry whose result could not be read, and anything not printed because of
 a timeout stay unread.
 
@@ -25,14 +33,13 @@ end, and no new call starts after its time. A call past its time gets SIGTERM, t
 and the hook waits until it has exited. A slow or stalled server costs one line, `codex-drive status did not
 finish within 4 s`, and unread completions are still listed.
 
-Before it lists completions, the hook and `/codex-workers` call `codex-drive result <name> --turn <id> --json` for
-each settled turn that `status` reports but the outbox never recorded. That is how the entry of a logger that died
-is repaired. Repairs left over at the deadline are done by a later run.
+Before listing completions, the hook and `/codex-workers` repair missing outbox entries for settled turns in their
+respective status views. They use `codex-drive result <name> --turn <id> --json`. A later run can finish repairs
+left over at the deadline.
 
 ## Requirements
 
-- `codex-drive` on `PATH` with `inbox --cwd` and `inbox --ack <key>` (this branch or later). An older one fails
-  with `Unknown option: --cwd`. The hook reports this in one line, and the monitor reports it once and stops.
+- `codex-drive` on `PATH` with `status --owner` and `inbox --owner`, or set `CODEX_DRIVE_BIN`.
 - Node.js 24 or later, the same as codex-drive.
 - An interactive Claude Code session for the monitor. Plugin monitors do not start with `-p`.
 
@@ -74,27 +81,21 @@ Set these in the environment Claude Code starts with:
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CODEX_DRIVE_BIN` | `codex-drive` | The executable the hook, the monitor and `/codex-workers` call. |
-| `CODEX_WORKERS_CWD` | the project directory | The directory scope for all three. Use `/` for every worker in the driver home. Paths are compared with symlinks resolved on both sides. |
+| `CODEX_WORKERS_CWD` | the project directory | The directory scope for all three. Use `/` to remove the directory restriction. Paths are compared with symlinks resolved on both sides. |
 | `CODEX_WORKERS_SINCE` | `24h` | Only sessions with an event in this window are inspected. This bounds the hook's time, because `status` makes one server call per session. |
 | `CODEX_WORKERS_DEADLINE_MS` | `5000` | The `SessionStart` budget in milliseconds. `/codex-workers` has 30 seconds. |
 | `CODEX_DRIVE_HOME` | `~/.codex-drive` | codex-drive's own setting. It applies to all three parts. |
 
 ## Behaviour to know
 
-- **Read state is shared.** One acknowledgement marker per completion is shared by every session and the
-  monitor. A completion normally appears once: as a notification in a session whose
-  monitor is running, or at the next session start. It can appear twice when two readers list it before either has
-  acknowledged it. This happens when two sessions of one project read at the same moment, or when a session's hook
-  and monitor both start while it is unread. Each reader prints an entry at most once. Claude Code gives a hook no receipt, so the plugin acknowledges an entry
-  once its output is written; a session that ends in that instant can miss the notification. Recover with
-  `codex-drive inbox --cwd <project>` (every retained completion, read or not; retention is 14 days or the newest
-  2,000 turns by default), then `codex-drive result <name> --turn <turnId>` with the entry's own turn. `/codex-workers` shows the running workers, up to 50 unread completions (older ones stay unread) and up to eight already-read completions from
-  the last 24 hours.
+- **Read state follows the session.** A completion can appear twice if a session's hook and monitor list it
+  before either acknowledges it. The plugin acknowledges after writing to stdout. If the session closes at that
+  point, use `codex-drive inbox --cwd <project>` to recover any retained entry. `/codex-workers` shows up to 50
+  unread completions and eight read completions from the last 24 hours.
 - **Wake-up.** The documentation says only that what a monitor prints "reaches Claude as notifications". In a
   test on Claude Code 2.1.325, a monitor line started a turn in an idle interactive session with no user message.
   See [Verification](#verification).
-- **First run.** Sessions that settled before codex-drive had an outbox have no entry. On the first run, the hook
-  repairs those from the last 24 hours and lists them once as unread.
+- **Existing workers.** Older records without an owner remain visible in the manual views.
 
 ## Documentation used
 
@@ -114,6 +115,7 @@ The formats follow the Claude Code documentation as read on 2026-11-16:
   output before Claude sees the skill. `allowed-tools` pre-approves it, and a command that fails aborts the
   invocation, so `show` always exits 0. A plugin skill with a frontmatter `name` is also invocable bare, as
   `/codex-workers`, unless another command has that name. The docs prefer skills to `commands/` for new plugins.
+- Session identity in Bash and hooks is documented under [Claude Code environment variables](https://code.claude.com/docs/en/env-vars#claude-code-session-id).
 - Validation and installation: <https://code.claude.com/docs/en/plugins/cli-reference> (`claude plugin validate`,
   `marketplace add`, `install`, `disable`), <https://code.claude.com/docs/en/plugins/create> (`--plugin-dir`) and
   <https://code.claude.com/docs/en/plugins/marketplace-reference>.
@@ -132,7 +134,7 @@ The formats follow the Claude Code documentation as read on 2026-11-16:
   - acknowledgement after printing, with overflow left unread
   - the dead-logger repair
   - the deadline, with a stalled server and with a binary that ignores SIGTERM (it is reaped)
-  - two sessions starting at once
+  - separate owners and read state, resume, compaction, inherited script ownership and quiet waits
   - `/codex-workers`, with and without a name, including an unreadable result that stays unread
   - the monitor's one line per completion, and its stop without acknowledgement when its output is gone
 
@@ -147,3 +149,9 @@ The formats follow the Claude Code documentation as read on 2026-11-16:
   `1 monitor` in the footer. A completion recorded while the session was idle arrived as a monitor event. Claude
   then answered it unprompted, and the entry was acknowledged. This run used the first version of the monitor,
   which printed raw JSON. The current version prints one formatted line and is covered by the tests above.
+- A headless pseudo-terminal probe on Claude Code 2.1.328 used a local fixture API and isolated settings.
+  The Bash subprocess, a script launched from a subagent's Bash tool, the hooks and the monitor agreed on the
+  session ID. The ID survived `/compact`, CLI `--resume` and `--continue`. An in-process `/resume` switched the
+  hook ID while leaving the monitor process running. With the updated plugin loaded via `--plugin-dir`,
+  completions reached the conversation active before and after the switch. The previous owner's subsequent
+  completion, an unowned completion and a quiet completion stayed in the manual inbox.

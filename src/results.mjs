@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { connection } from './client.mjs';
 import { failureDetails } from './failures.mjs';
+import { turnNotification } from './state.mjs';
 import { findState, findTurn, agentMessage, portFor, recordQuietly } from './turns.mjs';
 
 // Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
@@ -8,7 +9,7 @@ const exits = { completed: 0, failed: 1, interrupted: 1 };
 const fail = (message, exitCode) => Object.assign(new Error(message), { exitCode });
 const statusOf = turn => !turn ? 'idle' : turn.status === 'inProgress' ? 'running' : turn.status;
 const view = (state, turn, message, source) => ({ name: state.name ?? null, threadId: state.threadId, turnId: turn?.id ?? null,
-  status: statusOf(turn), failure: turn?.status === 'failed' ? failureDetails(turn.error) : null, source, message });
+  owner: turnNotification(state, turn?.id ?? null).owner, status: statusOf(turn), failure: turn?.status === 'failed' ? failureDetails(turn.error) : null, source, message });
 // History snapshots can lose a terminal error; the saved failure of the same turn wins, as in wait.
 const reconcile = (state, turn) => turn && turn.id === state.turnId && state.status === 'failed' && ['failed', 'interrupted'].includes(turn.status) ? { ...turn, status: 'failed', error: state.error ?? turn.error } : turn;
 
