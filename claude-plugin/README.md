@@ -48,14 +48,14 @@ left over at the deadline.
 Try it for one session without installing anything:
 
 ```sh
-claude --plugin-dir /Users/krisztiaan/dev/codex-drive/claude-plugin
+claude --plugin-dir /path/to/codex-drive/claude-plugin
 ```
 
-Install it from the local marketplace at the repository root (`.claude-plugin/marketplace.json`), at user scope:
+Install it from the marketplace at the repository root (`.claude-plugin/marketplace.json`), at user scope:
 
 ```sh
-claude plugin validate /Users/krisztiaan/dev/codex-drive
-claude plugin marketplace add /Users/krisztiaan/dev/codex-drive
+claude plugin validate /path/to/codex-drive
+claude plugin marketplace add /path/to/codex-drive
 claude plugin install codex-drive@codex-drive
 ```
 

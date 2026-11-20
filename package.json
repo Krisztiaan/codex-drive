@@ -1,11 +1,43 @@
 {
   "name": "codex-drive",
-  "version": "0.3.0",
-  "private": true,
+  "version": "0.4.0",
+  "description": "Multi-model Codex worker driver, role-based orchestration, leveled review ensemble, Claude Code plugin, Codex pack, and guardrail hooks.",
+  "license": "MIT",
+  "author": "Krisztiaan",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Krisztiaan/codex-drive.git"
+  },
+  "homepage": "https://github.com/Krisztiaan/codex-drive#readme",
+  "bugs": {
+    "url": "https://github.com/Krisztiaan/codex-drive/issues"
+  },
+  "keywords": [
+    "codex",
+    "claude-code",
+    "ai-agents",
+    "multi-model",
+    "code-review",
+    "orchestration",
+    "workflow",
+    "cli"
+  ],
   "type": "module",
   "bin": {
     "codex-drive": "./src/cli.mjs"
   },
+  "files": [
+    "src/",
+    "protocol/",
+    "claude-plugin/",
+    ".claude-plugin/",
+    "codex-pack/",
+    "review-prompts/",
+    "templates/",
+    "scripts/install.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=24"
   },

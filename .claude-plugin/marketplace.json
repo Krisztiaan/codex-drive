@@ -1,12 +1,12 @@
 {
   "name": "codex-drive",
-  "description": "Local marketplace for the codex-drive Claude Code plugin.",
-  "owner": { "name": "codex-drive" },
+  "description": "Marketplace for the codex-drive Claude Code plugin.",
+  "owner": { "name": "Krisztiaan" },
   "plugins": [
     {
       "name": "codex-drive",
       "source": "./claude-plugin",
-      "description": "Codex workers driven by codex-drive in Claude Code: session-start summary, completion notifications and /codex-workers."
+      "description": "Codex workers driven by codex-drive in Claude Code: session-start summary, completion notifications, /codex-workers, codex-goals skill, and wait/stash guardrails."
     }
   ]
 }

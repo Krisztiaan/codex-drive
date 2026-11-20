@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v codex-drive >/dev/null 2>&1 && exec codex-drive hook all --agent codex || exit 0",
+            "timeout": 5,
+            "statusMessage": "Checking wait and git-stash guardrails"
+          }
+        ]
+      }
+    ]
+  }
+}

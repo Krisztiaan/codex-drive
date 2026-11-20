@@ -19,6 +19,11 @@ import { pendingRequests, respond } from './requests.mjs';
 import { turnResult, resultText } from './results.mjs';
 import { inbox, follow } from './outbox.mjs';
 import { findState, snapshot, statusView, runAttached, waitForTurn, effectiveState } from './turns.mjs';
+import { applyRoleToOptions, formatRolesTable, loadRoles } from './roles.mjs';
+import { DEFAULT_MINUTES, inspectLanes, laneLine } from './lanes.mjs';
+import { runHookFromStdin } from './hooks.mjs';
+import { levelTable, REVIEW_EXIT, runReview } from './review.mjs';
+import { runSetup } from './setup.mjs';
 
 const detachedWorker = typeof process.send === 'function';
 const print = value => console.log(JSON.stringify(value));
@@ -93,14 +98,19 @@ const usage = `Usage: codex-drive <command>
   serve [--port <port>] [--stop | --prune | --restart] [--force] [--timeout seconds]
   methods
   call <method> [<params-json>|@file|-] [--param key=<json>]
-  start ["<prompt>"] [--cwd <dir>] [--model <m>] [--effort <e>] [--log <file>] [--name <n>] [--detach] [--quiet]
-  resume <name|threadId> ["<prompt>"] [--detach] [--quiet]
+  start ["<prompt>"] [--cwd <dir>] [--role <role>] [--model <m>] [--effort <e>] [--log <file>] [--name <n>] [--detach] [--quiet]
+  resume <name|threadId> ["<prompt>"] [--role <role>] [--detach] [--quiet]
   adopt|attach <threadId> [--name <n>] [--log <file>] [--detach] [--quiet]
   fork <name|threadId> [--name <new-name>] [--log <file>]
   wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
   status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob] [--owner <session-id>]
   result <name|threadId> [--turn <id>] [--json]
   inbox [<threadId@turnId>...] [--follow] [--since <time>|--unread] [--ack] [--cwd prefix] [--owner <session-id>]
+  roles [--json] [--cwd <dir>]
+  lanes [--dir <path>] [--cwd <dir>] [--minutes 60] [--json]
+  review --worktree <dir> --base <rev> --head <rev> --brief <path> --name <prefix> --kind handoff|rereview|design [--level 0..3] [--codex-only] [--dry-run]
+  hook <wait-guard|stash-guard|all> [--agent claude|codex]
+  setup [--roles] [--codex] [--claude] [--templates <dir>] [--force] [--dry-run] [--json]
   prune [--calls] [--older-than 30d] [--apply]
   events <name|threadId> [--follow]
   tail <name|threadId> [-n 20]
@@ -136,6 +146,60 @@ async function main() {
   if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
   if (command === 'methods') { print(methods()); return; }
+  if (command === 'roles') {
+    const loaded = loadRoles({ cwd: options.cwd ?? process.cwd() });
+    if (options.json) print(loaded); else console.log(formatRolesTable(loaded));
+    return;
+  }
+  if (command === 'lanes') {
+    const minutes = options.minutes ? Number(options.minutes) : DEFAULT_MINUTES;
+    const report = await inspectLanes({ cwd: options.cwd, dir: options.dir, minutes });
+    if (options.json) print(report);
+    else {
+      for (const lane of report.lanes) console.log(laneLine(lane, minutes));
+      console.log(`lanes: ${report.lanes.length} lanes, ${report.stalled.length} stalled (no commit, file change or process for ${minutes} min with uncommitted work)${report.stalled.length ? `: ${report.stalled.map(l => l.name).join(', ')}` : ''}`);
+    }
+    process.exitCode = report.stalled.length ? 1 : 0;
+    return;
+  }
+  if (command === 'hook') {
+    const output = runHookFromStdin(positional[0], options.agent ?? 'claude');
+    if (output) print(output);
+    return;
+  }
+  if (command === 'review') {
+    if (options.help) {
+      console.log(`Usage: codex-drive review --worktree <dir> --base <rev> --head <rev> --brief <path> --name <prefix> --kind handoff|rereview|design [--level 0..3] [--record] [--previous <run-dir>] [--effort <e>] [--timeout <s>] [--codex-only] [--dry-run] [--json]\n${levelTable()}`);
+      return;
+    }
+    for (const req of ['worktree', 'base', 'head', 'brief', 'name', 'kind']) {
+      if (!options[req]) {
+        const err = new Error(`--${req} is required for review (use codex-drive review --help)`);
+        err.exitCode = REVIEW_EXIT.usage;
+        throw err;
+      }
+    }
+    const { exitCode, summary } = await runReview(options);
+    if (options.json || options['dry-run']) print(summary);
+    else {
+      console.log(`review ${summary.verdict ?? 'done'} (exit ${exitCode})${summary.runDir ? ` — ${summary.runDir}` : ''}`);
+      for (const f of summary.findings ?? []) console.log(`  ${f.severity} ${f.file}:${f.line} [${f.reviewers.join(',')}] ${f.detail}`);
+    }
+    process.exitCode = exitCode;
+    return;
+  }
+  if (command === 'setup') {
+    const result = runSetup(options);
+    if (options.json) print(result);
+    else {
+      for (const a of result.actions) console.log(`${a.status}: ${a.dest}`);
+      if (result.nextSteps.length) {
+        console.log('');
+        for (const step of result.nextSteps) console.log(step);
+      }
+    }
+    return;
+  }
   if (command === 'serve') { print(await manageServers(options)); return; }
   if (command === 'account') {
     const active = diskIdentity();
@@ -151,22 +215,25 @@ async function main() {
     return;
   }
   const store = new Store();
-  if (options.detach) {
+  const effectiveOptions = ['start', 'resume'].includes(command) && options.role
+    ? applyRoleToOptions(options, { home: store.home })
+    : options;
+  if (effectiveOptions.detach) {
     await detach(detachedArgs(process.argv.slice(2))); return;
   }
   if (['start', 'resume', 'adopt', 'attach'].includes(command)) {
     if (detachedWorker) {
       const state = command === 'start' ? null : findState(store, positional[0]);
-      const logPath = options.log ?? state?.logPath ?? join(store.home, 'logs', `detached-${process.pid}.jsonl`);
-      options.log = logPath; mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
+      const logPath = effectiveOptions.log ?? state?.logPath ?? join(store.home, 'logs', `detached-${process.pid}.jsonl`);
+      effectiveOptions.log = logPath; mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
       console.error = (...parts) => appendFileSync(logPath, JSON.stringify({ receivedAt: new Date().toISOString(), method: 'driver/diagnostic', params: { message: parts.join(' ') } }) + '\n', { mode: 0o600 });
     }
-    const key = command === 'start' ? options.name ?? `pending-${process.pid}` : positional[0];
+    const key = command === 'start' ? effectiveOptions.name ?? `pending-${process.pid}` : positional[0];
     const callbacks = detachedWorker ? {
       ready: ids => process.send({ ids }, () => process.disconnect()),
       diagnostic: diagnostic => { if (process.connected) process.send({ diagnostic }); },
     } : {};
-    await runAttached(store, command, options, key, command === 'start' ? positional[0] : positional[1], callbacks); return;
+    await runAttached(store, command, effectiveOptions, key, command === 'start' ? positional[0] : positional[1], callbacks); return;
   }
   if (command === 'pending') { print(pendingRequests(store.home, positional[0] ? findState(store, positional[0])?.threadId ?? positional[0] : undefined)); return; }
   if (command === 'respond') { const payload = readJson(positional[1]); print(await respond(store.home, positional[0], options.error ? undefined : payload, { error: options.error ? payload : undefined })); return; }

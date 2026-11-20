@@ -2,3 +2,5 @@ node_modules/
 .drive/
 /.workspaces/
 .worktrees/
+.DS_Store
+.runtime/

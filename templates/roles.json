@@ -1,0 +1,76 @@
+{
+  "roles": {
+    "architect": {
+      "provider": "codex",
+      "model": "gpt-6.2-sol",
+      "effort": "high",
+      "sandbox": "read-only",
+      "style": "goal-driven",
+      "description": "Planning, architecture, direction notes, and high-stakes review."
+    },
+    "reviewer": {
+      "provider": "codex",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "sandbox": "read-only",
+      "style": "goal-driven",
+      "description": "Fast, high-recall read-only code review lenses."
+    },
+    "design-reviewer": {
+      "provider": "codex",
+      "model": "gpt-6.2-astra",
+      "effort": "medium",
+      "sandbox": "read-only",
+      "style": "goal-driven",
+      "description": "Pre-implementation design and direction note review."
+    },
+    "implementer": {
+      "provider": "codex",
+      "model": "gpt-6.2-sol",
+      "effort": "medium",
+      "sandbox": "danger-full-access",
+      "style": "goal-driven",
+      "description": "Complex, logic-heavy implementation (state, concurrency, custody, schema)."
+    },
+    "mechanical": {
+      "provider": "codex",
+      "model": "gpt-6-luna",
+      "effort": "high",
+      "sandbox": "danger-full-access",
+      "style": "prescriptive",
+      "description": "Bounded mechanical edits, renames, codemods, and bulk updates."
+    },
+    "mapper": {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "sandbox": "read-only",
+      "style": "goal-driven",
+      "description": "Read-only codebase mapping, ownership, and dependency tracing."
+    },
+    "tester": {
+      "provider": "codex",
+      "model": "gpt-6.2-sol",
+      "effort": "high",
+      "sandbox": "danger-full-access",
+      "style": "goal-driven",
+      "description": "Adversarial failing-test prover for blocking review findings."
+    },
+    "generalist": {
+      "provider": "claude",
+      "model": "opus",
+      "effort": "high",
+      "sandbox": "read-only",
+      "style": "goal-driven",
+      "description": "Cross-cutting generalist reviewer and UI/UX implementer."
+    },
+    "slice": {
+      "provider": "agy",
+      "model": "gemini-4-hydrogen-high",
+      "effort": "high",
+      "sandbox": "danger-full-access",
+      "style": "prescriptive",
+      "description": "Well-defined implementation slice fully verified by tests or lint."
+    }
+  }
+}

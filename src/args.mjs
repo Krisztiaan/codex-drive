@@ -1,8 +1,12 @@
 import { resolve } from 'node:path';
 import { DEFAULT_PERMISSIONS } from './defaults.mjs';
 
-const values = new Set(['port', 'cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'name', 'log', 'turn', 'n', 'timeout', 'param', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity', 'since', 'older-than', 'owner']);
-const turnOptions = ['cwd', 'cd', 'model', 'effort', 'sandbox', 'approval', 'add-dir', 'detach', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity', 'quiet'];
+const values = new Set([
+  'port', 'cwd', 'cd', 'model', 'effort', 'role', 'sandbox', 'approval', 'add-dir', 'name', 'log', 'turn', 'n',
+  'timeout', 'param', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity', 'since', 'older-than', 'owner',
+  'dir', 'minutes', 'agent', 'worktree', 'base', 'head', 'brief', 'kind', 'level', 'previous', 'templates', 'home', 'codex-home',
+]);
+const turnOptions = ['cwd', 'cd', 'model', 'effort', 'role', 'sandbox', 'approval', 'add-dir', 'detach', 'thread-params', 'turn-params', 'request-policy', 'retry-capacity', 'quiet'];
 const allowed = {
   serve: ['port', 'stop', 'prune', 'restart', 'force', 'timeout'], start: [...turnOptions, 'name', 'log'], resume: [...turnOptions, 'name', 'log'],
   adopt: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy', 'quiet'], attach: ['name', 'log', 'detach', 'sandbox', 'approval', 'thread-params', 'request-policy', 'quiet'],
@@ -10,10 +14,21 @@ const allowed = {
   steer: ['turn'], interrupt: ['turn'], status: ['json', 'active', 'cwd', 'since', 'name', 'owner'], result: ['turn', 'json'], inbox: ['follow', 'since', 'unread', 'ack', 'cwd', 'owner'], wait: ['timeout', 'all', 'any'], tail: ['n'], events: ['follow'],
   pending: [], respond: ['error'], call: ['request-policy'], methods: [],
   list: [], read: [], archive: [], unarchive: [], rollback: [], compact: [], name: [], models: [], account: ['json'], 'rate-limits': ['json'], prune: ['older-than', 'apply', 'calls'],
+  roles: ['json', 'cwd'],
+  lanes: ['dir', 'cwd', 'minutes', 'json'],
+  hook: ['agent'],
+  review: ['worktree', 'base', 'head', 'brief', 'name', 'kind', 'level', 'record', 'previous', 'effort', 'timeout', 'codex-only', 'dry-run', 'json', 'help'],
+  setup: ['roles', 'codex', 'claude', 'templates', 'home', 'codex-home', 'force', 'dry-run', 'json'],
 };
 // Commands taking any number of positionals, with their minimum.
 const variadic = { wait: 1, inbox: 0 };
-const counts = { serve: [0], start: [0, 1], resume: [1, 2], adopt: [1], attach: [1], fork: [1], steer: [2], interrupt: [1], status: [0, 1], result: [1],  tail: [1], events: [1], pending: [0, 1], respond: [2], call: [1, 2], methods: [0], list: [0], read: [1], archive: [1], unarchive: [1], rollback: [1], compact: [1], name: [2], models: [0], account: [0], 'rate-limits': [0], prune: [0] };
+const counts = {
+  serve: [0], start: [0, 1], resume: [1, 2], adopt: [1], attach: [1], fork: [1], steer: [2], interrupt: [1],
+  status: [0, 1], result: [1], tail: [1], events: [1], pending: [0, 1], respond: [2], call: [1, 2], methods: [0],
+  list: [0], read: [1], archive: [1], unarchive: [1], rollback: [1], compact: [1], name: [2], models: [0],
+  account: [0], 'rate-limits': [0], prune: [0],
+  roles: [0], lanes: [0], hook: [1], review: [0], setup: [0],
+};
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
   if (!allowed[command]) throw new Error('Unknown command; use codex-drive --help');
@@ -38,7 +53,8 @@ export function parseArgs(argv) {
   if ('port' in options && (!/^\d+$/.test(options.port) || +options.port < 1 || +options.port > 65535)) throw new Error('Port must be 1..65535');
   if (options['allow-other-account'] && !options.port) throw new Error('--allow-other-account requires --port');
   if ('timeout' in options && (!Number.isFinite(Number(options.timeout)) || Number(options.timeout) <= 0 || Number(options.timeout) * 1000 > 2147483647)) throw new Error('--timeout must be positive seconds within the Node timer range');
-  for (const [key, minimum] of [['n', 1], ['retry-capacity', 0]]) if (key in options && (!/^\d+$/.test(options[key]) || !Number.isSafeInteger(+options[key]) || +options[key] < minimum)) throw new Error(`--${key} must be a ${minimum ? 'positive' : 'nonnegative'} integer`);
+  for (const [key, minimum] of [['n', 1], ['retry-capacity', 0], ['minutes', 1]]) if (key in options && (!/^\d+$/.test(options[key]) || !Number.isSafeInteger(+options[key]) || +options[key] < minimum)) throw new Error(`--${key} must be a ${minimum ? 'positive' : 'nonnegative'} integer`);
+  if (options.agent && !['claude', 'codex'].includes(options.agent)) throw new Error('--agent must be claude or codex');
   if (!(command in variadic ? positional.length >= variadic[command] : counts[command].includes(positional.length)) || positional.some(x => !x.trim())) throw new Error(`Wrong arguments for ${command}`);
   if (options.all && options.any) throw new Error('Choose --all or --any');
   if ([options.stop, options.restart, options.prune].filter(Boolean).length > 1) throw new Error('Choose --stop, --restart or --prune');

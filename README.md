@@ -1,10 +1,18 @@
 # codex-drive
 
-A Node 24+ command-line client for the installed Codex app-server. An orchestrator or person can make any generated protocol request, own a turn's event stream, answer server requests, adopt sessions and fork them. Named commands compose the same validated RPC core; they do not implement a separate Codex runtime.
+A Node 24+ multi-model worker driver and orchestration suite for the installed Codex app-server, Claude Code, and Codex CLI. An orchestrator or person can make any generated protocol request, dispatch workers by capability role, own a turn's event stream, answer server requests, adopt and fork sessions, run leveled multi-model code reviews, monitor worktree lanes, and enforce wait/stash guardrails.
 
-Requires `codex` on PATH, authenticated access for model turns, and `lsof`/`ps` for server ownership (tested on macOS). Runtime validation uses Ajv and the checked-in generated JSON Schema.
+Requires Node 24+, `codex` on PATH, authenticated access for model turns, and `lsof`/`ps` for server/lane ownership (tested on macOS). Runtime validation uses Ajv and the checked-in generated JSON Schema.
 
-## Install and regenerate
+## Install
+
+```sh
+npm install -g codex-drive
+codex-drive --help
+codex-drive setup --roles --codex --claude
+```
+
+Or from a local checkout:
 
 ```sh
 npm ci
@@ -13,7 +21,73 @@ codex-drive --help
 npm run protocol
 ```
 
-The installer symlinks `~/.local/bin/codex-drive` to this checkout's executable `src/cli.mjs`. It is repeatable and refuses to replace files, directories or foreign symlinks, including broken links. Ensure `~/.local/bin` is on PATH. No build step is required. Moving the checkout requires updating the link manually. Direct invocation and `npm link` also work.
+`codex-drive setup` installs `~/.codex-drive/roles.json`, copies the Codex pack (`bounded-handoff` skill + `code_mapper`/`mechanical_worker`/`risk_reviewer` agent presets) into `~/.codex/`, prints the Claude Code plugin install commands, and can scaffold `AGENTS.md`, `CLAUDE.md`, `BRIEF.md` and `roles.json` into any directory via `--templates <dir>`. Existing files are never overwritten unless `--force` is passed.
+
+## Multi-model workflow suite
+
+### 1. Role-based routing (`roles.json`)
+
+Models evolve quickly; briefs and review prompts should never hardcode vendor model names. `codex-drive` maps capability roles (`architect`, `reviewer`, `design-reviewer`, `implementer`, `mechanical`, `mapper`, `tester`, `generalist`, `slice`) to `{ provider, model, effort, sandbox, style }` in:
+
+1. Built-in defaults ([templates/roles.json](templates/roles.json))
+2. User overrides: `~/.codex-drive/roles.json` (or `$CODEX_DRIVE_HOME/roles.json`)
+3. Repository overrides: `<cwd>/.codex-drive/roles.json`
+
+```sh
+codex-drive roles
+codex-drive start --role implementer --cwd .worktrees/feat --name proj-feat --detach "Read BRIEF.md and execute it."
+codex-drive start --role reviewer --cwd .worktrees/feat --name proj-rev --detach "Review the diff."
+```
+
+Explicit `--model`, `--effort`, or `--sandbox` flags always override the role default.
+
+### 2. Leveled independent review (`codex-drive review`)
+
+Runs a read-only multi-model review ensemble with a zero-model mechanical pre-pass (`change.diff` + `mechanical.md` symbol/grep inventory), specialized narrow lenses (`state`, `invariants`, `inventory`, `tests`, `record`), read-ledger verification, finding deduplication, and worktree mutation detection:
+
+```sh
+codex-drive review --help
+codex-drive review --worktree .worktrees/feat --base main --head HEAD \
+  --brief docs/goals/feat.md --name proj-feat --kind handoff --level 2
+codex-drive review --worktree .worktrees/feat --base main --head HEAD \
+  --brief docs/goals/feat.md --name proj-feat --kind rereview --previous <run-dir>
+codex-drive review --worktree .worktrees/feat --base main --head HEAD \
+  --brief docs/goals/feat.md --name proj-feat --kind design
+```
+
+Override built-in prompts ([review-prompts/](review-prompts/)) per repository by placing `REVIEW-PROMPT.md` and `lenses/*.md` under `.codex-drive/review/`. Exit codes: `0` merge, `1` fix first, `2` usage error, `3` incomplete output, `4` void (worktree mutated during review), `5` insufficient reading, `75` capacity/usage limit, `124` timeout, `130` interrupted.
+
+### 3. Worktree lane watchdog (`codex-drive lanes`)
+
+Read-only check across `.worktrees/` (or `--dir <path>`) reporting `active`, `idle`, or `STALLED` (uncommitted work with no running process or recent file/commit activity within `--minutes`, default 60). Exits `1` if any lane is stalled.
+
+```sh
+codex-drive lanes
+codex-drive lanes --minutes 30 --json
+```
+
+### 4. Guardrail hooks (`codex-drive hook`)
+
+Zero-dependency `PreToolUse` Bash guards for both Claude Code and Codex CLI:
+
+- `wait-guard`: blocks blind `sleep N`, `until` loops, `pgrep -f`/`pkill -f` self-matching loops, and unbounded polling loops.
+- `stash-guard`: blocks mutating `git stash` commands (since `refs/stash` is shared across all worktrees) while allowing `git stash list` and `git stash show`.
+
+```sh
+codex-drive hook all --agent claude
+codex-drive hook all --agent codex
+```
+
+The bundled [Claude Code plugin](claude-plugin/README.md) wires these automatically alongside `SessionStart`, the background completion monitor, `/codex-workers`, and the `codex-goals` orchestrator skill. A matching Codex snippet is in [codex-pack/hooks.json](codex-pack/hooks.json).
+
+### 5. Bundled packs & templates
+
+- **[claude-plugin/](claude-plugin/)**: Claude Code plugin (`SessionStart` summary, live completion monitor, `/codex-workers`, `codex-goals` skill, `PreToolUse` wait/stash guards).
+- **[codex-pack/](codex-pack/)**: Codex `bounded-handoff` skill, `code_mapper`/`mechanical_worker`/`risk_reviewer` agent TOML presets, and `hooks.json`.
+- **[review-prompts/](review-prompts/)**: Generic leveled review prompt and 5 high-recall lenses.
+- **[templates/](templates/)**: Composable starter templates for `~/.codex/AGENTS.md` (additive — never `model_instructions_file`), `~/.claude/CLAUDE.md`, `BRIEF.md`, and `roles.json`.
+
+## Protocol regeneration
 
 `npm run protocol` runs `codex app-server generate-json-schema --experimental` and replaces [protocol/schema.json](protocol/schema.json) with the complete canonical bundle. It contains client requests, notifications, server requests, response types and error types. The current installed version produces **179 client methods and 11 server request methods**; [protocol/README.md](protocol/README.md) records its version. Regenerate after upgrading Codex. New client methods and parameters become available without changing runtime code. The generation step checks that every server request has a generated response schema. The former partial TypeScript reference tree has been removed.
 
