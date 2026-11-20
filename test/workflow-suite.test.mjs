@@ -165,9 +165,13 @@ test('setup installs roles, codex pack, and templates non-destructively', () => 
   }
 });
 
-test('CLI smoke checks for roles, review --help, and hook stdin', () => {
+test('CLI smoke checks for roles, progressive help, review --help, and hook stdin', () => {
   const rolesJson = JSON.parse(execFileSync(process.execPath, [CLI, 'roles', '--json'], { encoding: 'utf8' }));
   assert.ok(rolesJson.roles.architect);
+  const compactHelp = execFileSync(process.execPath, [CLI, '--help'], { encoding: 'utf8' });
+  assert.match(compactHelp, /Expand any topic: codex-drive help/);
+  const topicHelp = execFileSync(process.execPath, [CLI, 'help', 'roles'], { encoding: 'utf8' });
+  assert.match(topicHelp, /roles\.json/);
   const helpOut = execFileSync(process.execPath, [CLI, 'review', '--help'], { encoding: 'utf8' });
   assert.match(helpOut, /Review levels/);
   const hookOut = JSON.parse(execFileSync(process.execPath, [CLI, 'hook', 'stash-guard'], {

@@ -24,6 +24,7 @@ import { DEFAULT_MINUTES, inspectLanes, laneLine } from './lanes.mjs';
 import { runHookFromStdin } from './hooks.mjs';
 import { levelTable, REVIEW_EXIT, runReview } from './review.mjs';
 import { runSetup } from './setup.mjs';
+import { formatHelp } from './help.mjs';
 
 const detachedWorker = typeof process.send === 'function';
 const print = value => console.log(JSON.stringify(value));
@@ -94,56 +95,10 @@ async function detach(args) {
   });
   child.unref(); print(ids);
 }
-const usage = `Usage: codex-drive <command>
-  serve [--port <port>] [--stop | --prune | --restart] [--force] [--timeout seconds]
-  methods
-  call <method> [<params-json>|@file|-] [--param key=<json>]
-  start ["<prompt>"] [--cwd <dir>] [--role <role>] [--model <m>] [--effort <e>] [--log <file>] [--name <n>] [--detach] [--quiet]
-  resume <name|threadId> ["<prompt>"] [--role <role>] [--detach] [--quiet]
-  adopt|attach <threadId> [--name <n>] [--log <file>] [--detach] [--quiet]
-  fork <name|threadId> [--name <new-name>] [--log <file>]
-  wait <name|threadId> [...] [--all | --any] [--timeout <seconds>]
-  status [<name|threadId>] [--json] [--active] [--cwd prefix] [--since 24h] [--name glob] [--owner <session-id>]
-  result <name|threadId> [--turn <id>] [--json]
-  inbox [<threadId@turnId>...] [--follow] [--since <time>|--unread] [--ack] [--cwd prefix] [--owner <session-id>]
-  roles [--json] [--cwd <dir>]
-  lanes [--dir <path>] [--cwd <dir>] [--minutes 60] [--json]
-  review --worktree <dir> --base <rev> --head <rev> --brief <path> --name <prefix> --kind handoff|rereview|design [--level 0..3] [--codex-only] [--dry-run]
-  hook <wait-guard|stash-guard|all> [--agent claude|codex]
-  setup [--roles] [--codex] [--claude] [--templates <dir>] [--force] [--dry-run] [--json]
-  prune [--calls] [--older-than 30d] [--apply]
-  events <name|threadId> [--follow]
-  tail <name|threadId> [-n 20]
-  pending [<name|threadId>]
-  respond <requestId> <result-json>|@file|- [--error]
-  steer <name|threadId> [--turn <turnId>] "<text>"
-  interrupt <name|threadId> [--turn <turnId>]
-  list | read <id> | archive <id> | unarchive <id> | rollback <id> | compact <id> | name <id> <name>
-  models | account [--json] | rate-limits [--json]
-Server commands default to the active Codex login. Saved threads use their recorded server.
-To use another account, specify both --port and --allow-other-account.
-Protocol calls and turn compositions accept --param key=<json>.
-Start/resume accept --thread-params <json>|@file|- and --turn-params <json>|@file|-.
---param thread.key=<json> / turn.key=<json> explicitly scopes composed options.
-Start/resume/adopt/attach/fork: --sandbox workspace-write|read-only|danger-full-access, --approval <mode>.
-Start/resume: --add-dir <dir> (requires --sandbox workspace-write).
-Defaults: --sandbox ${DEFAULT_PERMISSIONS.sandbox}, --approval ${DEFAULT_PERMISSIONS.approval}, --request-policy ${DEFAULT_PERMISSIONS.requestPolicy}.
-Use --request-policy manual|decline for stricter request handling; resume respects saved thread settings.
---retry-capacity <n> on start/resume opts into same-thread continuation retries.
-Multi-wait defaults to --all; --any closes observers without interrupting turns.
-Combined exit: 76 if any usage limit, otherwise largest observed exit code.
-Prune defaults to dry-run; --apply removes confirmed old terminal local sessions.
-Wait exits: completed 0, other/error 1, capacity 75, usage limit 76, interrupted 130, timeout 124.
-result prints a header line (name status turnId [failure class]) and the full final agent message of the
-latest turn or --turn; a turn still running prints the header only and exits 3.
-Result exits: completed 0, failed or interrupted 1, unknown name or turn 2, not finished 3.
-inbox prints one JSON line per settled turn (no message text) recorded by its logger, wait or result;
---since takes 24h or an ISO time, --unread skips acknowledged entries, --ack acknowledges what it prints,
---cwd keeps entries whose worker ran in that directory or below it (symlinks resolved on both sides),
---owner <session-id> selects that Claude Code session's automatic notifications,
-entry keys keep only those entries (inbox --ack <key> acknowledges exactly one), --follow prints new ones as recorded.`;
 async function main() {
-  if (process.argv.length === 2 || ['--help', '-h', 'help'].includes(process.argv[2])) { console.log(usage); return; }
+  if (process.argv.length === 2 || ['--help', '-h'].includes(process.argv[2])) { console.log(formatHelp()); return; }
+  if (process.argv[2] === 'help') { console.log(formatHelp(process.argv[3])); return; }
+  if (process.argv[3] === '--help' || process.argv[3] === '-h') { console.log(formatHelp(process.argv[2])); return; }
   const { command, options, positional } = parseArgs(process.argv.slice(2));
   if (command === 'methods') { print(methods()); return; }
   if (command === 'roles') {

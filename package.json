@@ -29,6 +29,7 @@
   "files": [
     "src/",
     "protocol/",
+    "docs/",
     "claude-plugin/",
     ".claude-plugin/",
     "codex-pack/",

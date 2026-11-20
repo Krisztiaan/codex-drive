@@ -59,7 +59,7 @@ export function parseArgs(argv) {
   if (options.all && options.any) throw new Error('Choose --all or --any');
   if ([options.stop, options.restart, options.prune].filter(Boolean).length > 1) throw new Error('Choose --stop, --restart or --prune');
   if (options.prune && options.port) throw new Error('Use serve --stop to target an explicit port');
-  if (options.force && !options.stop && !options.restart && !options.prune) throw new Error('--force requires --stop, --restart or --prune');
+  if (options.force && command !== 'setup' && !options.stop && !options.restart && !options.prune) throw new Error('--force requires --stop, --restart or --prune');
   if (options.cwd && options.cd) throw new Error('Choose --cwd or --cd');
   if (options.cwd || options.cd) options.cwd = resolve(options.cwd ?? options.cd);
   if (options.log) options.log = resolve(options.log);
