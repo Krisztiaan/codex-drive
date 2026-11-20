@@ -6,7 +6,7 @@
   "author": "Krisztiaan",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Krisztiaan/codex-drive.git"
+    "url": "git+https://github.com/Krisztiaan/codex-drive.git"
   },
   "homepage": "https://github.com/Krisztiaan/codex-drive#readme",
   "bugs": {
@@ -24,7 +24,7 @@
   ],
   "type": "module",
   "bin": {
-    "codex-drive": "./src/cli.mjs"
+    "codex-drive": "src/cli.mjs"
   },
   "files": [
     "src/",
