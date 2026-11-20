@@ -1,6 +1,6 @@
 {
   "name": "codex-drive",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Multi-model Codex worker driver, role-based orchestration, leveled review ensemble, Claude Code plugin, Codex pack, and guardrail hooks.",
   "license": "MIT",
   "author": "Krisztiaan",
